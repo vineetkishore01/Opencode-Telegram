@@ -18,33 +18,31 @@ const { values } = parseArgs({
     directory: {
       type: 'string',
       short: 'd',
-      default: process.cwd(),
     },
     port: {
       type: 'string',
       short: 'p',
-      default: '4097',
     },
     'no-server': {
       type: 'boolean',
-      default: false,
     },
     check: {
       type: 'boolean',
-      default: false,
     },
     uninstall: {
       type: 'boolean',
-      default: false,
     },
     help: {
       type: 'boolean',
       short: 'h',
-      default: false,
     },
   },
   allowPositionals: true,
 })
+
+// Set defaults after parseArgs
+const directory = values.directory || process.cwd()
+const port = values.port || '4097'
 
 if (values.help) {
   console.log(`
@@ -131,7 +129,7 @@ async function runSetup(projectDir: string): Promise<boolean> {
 }
 
 async function main() {
-  const projectDir = resolve(values.directory as string)
+  const projectDir = resolve(directory)
 
   // Validate project directory
   if (!existsSync(projectDir)) {
@@ -183,7 +181,7 @@ async function main() {
     }
   }
 
-  const port = parseInt(values.port as string, 10)
+  const portNum = parseInt(port, 10)
   const startServer = !values['no-server']
 
   // Load and validate configuration
@@ -200,14 +198,14 @@ async function main() {
   // Start OpenCode server if needed
   if (startServer) {
     logger.info('Starting OpenCode server...')
-    openCodeServer = new OpenCodeServer(projectDir, port)
+      openCodeServer = new OpenCodeServer(projectDir, portNum)
 
-    try {
-      await openCodeServer.start()
-      logger.info('OpenCode server started')
+      try {
+        await openCodeServer.start()
+        logger.info('OpenCode server started')
 
-      // Update config with actual port
-      botConfig.openCodeUrl = `http://localhost:${port}`
+        // Update config with actual port
+        botConfig.openCodeUrl = `http://localhost:${portNum}`
     } catch (error) {
       logger.error('Failed to start OpenCode server', { error: (error as Error).message })
       process.exit(1)
