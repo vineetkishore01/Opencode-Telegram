@@ -203,7 +203,7 @@ async function main() {
     try {
       await openCodeServer.start()
       console.log('✅ OpenCode server started')
-      botConfig.openCodeUrl = `http://localhost:${portNum}`
+      botConfig.openCodeUrl = `http://127.0.0.1:${portNum}`
     } catch (error) {
       console.error(`❌ Failed to start OpenCode server: ${(error as Error).message}`)
       process.exit(1)

@@ -46,17 +46,18 @@ export class EventProcessor {
         }
       } catch (error) {
         this.consecutiveErrors++
+        const errorMsg = (error as Error).message || 'Unknown error'
         
         if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
-          log.error('Too many consecutive connection failures, stopping event processor')
+          log.error(`Too many consecutive connection failures, stopping event processor: ${errorMsg}`)
           this.running = false
           break
         }
 
         if (this.consecutiveErrors === 1) {
-          log.error('Event stream disconnected, will retry with backoff')
+          log.error(`Event stream disconnected: ${errorMsg}. Will retry with backoff.`)
         } else {
-          log.warn(`Event stream reconnection attempt ${this.consecutiveErrors}/${this.maxConsecutiveErrors}`)
+          log.warn(`Event stream reconnection attempt ${this.consecutiveErrors}/${this.maxConsecutiveErrors}: ${errorMsg}`)
         }
 
         if (this.running) {

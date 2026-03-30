@@ -33,7 +33,7 @@ export class OpenCodeServer {
   private async waitForServer(maxAttempts: number = 30): Promise<boolean> {
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        const response = await fetch(`http://localhost:${this.port}/session`, {
+        const response = await fetch(`http://127.0.0.1:${this.port}/session`, {
           signal: AbortSignal.timeout(1000),
         })
         if (response.ok || response.status < 500) {
