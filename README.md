@@ -13,7 +13,7 @@ Clone this repository and install it globally on your system:
 
 ```bash
 git clone https://github.com/vineetkishore01/Opencode-Telegram.git
-cd Opencode-Telegram/opencode-telegram-bot
+cd Opencode-Telegram
 npm install
 npm run build
 sudo npm install -g .
