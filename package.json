@@ -1,6 +1,6 @@
 {
   "name": "opencode-tele",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Telegram bot for OpenCode remote development",
   "main": "dist/index.js",
   "bin": {
