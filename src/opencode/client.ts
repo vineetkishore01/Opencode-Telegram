@@ -27,6 +27,13 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// Create a persistent agent for all requests
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 10,
+  timeout: 60000,
+})
+
 export class OpenCodeClient {
   private baseUrl: string
   private auth?: { username: string; password: string }
@@ -45,7 +52,6 @@ export class OpenCodeClient {
   private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'Connection': 'close', // Don't keep-alive to avoid "terminated" issues
     }
     if (this.auth) {
       const credentials = Buffer.from(`${this.auth.username}:${this.auth.password}`).toString('base64')
@@ -69,6 +75,7 @@ export class OpenCodeClient {
             method: method,
             headers: headers,
             timeout: REQUEST_TIMEOUT,
+            agent: httpAgent, // Use the persistent agent
           }
 
           const req = http.request(reqOptions, (res) => {

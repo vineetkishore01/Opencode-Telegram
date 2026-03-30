@@ -29,8 +29,10 @@ export class EventProcessor {
     const log = getLogger()
     log.info('Event processor started (Polling mode)')
 
-    // Initial delay to let server settle
-    await new Promise(resolve => setTimeout(resolve, 3000))
+    // Initial delay to let server fully settle (AI models, internal db, etc)
+    console.log('⏳ Waiting 10s for OpenCode server to initialize...')
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    console.log('✅ Initialization wait complete.')
 
     while (this.running) {
       try {
