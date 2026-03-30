@@ -19,7 +19,7 @@ export class PermissionHandler {
     const chatId = this.stateManager.getChatIdForSession(permission.sessionID)
 
     if (!chatId) {
-      log.warn('No chat found for session', { sessionId: permission.sessionID })
+      // Silent: This session belongs to another client (CLI or another bot)
       return
     }
 

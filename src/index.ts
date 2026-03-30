@@ -165,15 +165,14 @@ async function main() {
 
     const binaryPath = '/usr/local/bin/opencode-tele'
     if (existsSync(binaryPath)) {
-      console.log(`\nTo completely remove the global binary, run:`)
-      console.log(`  sudo rm ${binaryPath}`)
+      console.log(`\nTo completely remove the global binary, run:\n  sudo rm -f ${binaryPath}`)
       uninstalled = true
     }
 
     if (!uninstalled) {
-      console.log('No project configuration or global binary found. Your system is already clean.')
+      console.log('✨ Your system is already clean of OpenCode Telegram Bot configs and binaries.')
     } else {
-      console.log('\n✨ System cleanup instructions provided above.')
+      console.log('\n🧹 System cleanup instructions/actions provided above.')
     }
     process.exit(0)
   }
