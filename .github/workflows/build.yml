@@ -49,13 +49,13 @@ jobs:
         run: mkdir -p binaries
 
       - name: Build Linux binary
-        run: pkg . --targets node18-linux-x64 --output binaries/opencode-tele-linux-x64
+        run: pkg dist/index.js --targets node18-linux-x64 --output binaries/opencode-tele-linux-x64
 
       - name: Build macOS binary
-        run: pkg . --targets node18-macos-x64 --output binaries/opencode-tele-macos-x64
+        run: pkg dist/index.js --targets node18-macos-x64 --output binaries/opencode-tele-macos-x64
 
       - name: Build Windows binary
-        run: pkg . --targets node18-win-x64 --output binaries/opencode-tele-win-x64.exe
+        run: pkg dist/index.js --targets node18-win-x64 --output binaries/opencode-tele-win-x64.exe
 
       - name: Make binaries executable
         run: chmod +x binaries/opencode-tele-linux-x64 binaries/opencode-tele-macos-x64

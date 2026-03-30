@@ -1,19 +1,11 @@
 {
   "name": "opencode-tele",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Telegram bot for OpenCode remote development",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
     "opencode-tele": "./bin/opencode-tele.js"
-  },
-  "pkg": {
-    "scripts": [
-      "dist/**/*.js"
-    ],
-    "assets": [
-      "node_modules/**/*"
-    ]
   },
   "scripts": {
     "build": "tsc",
