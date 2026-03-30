@@ -156,11 +156,23 @@ async function main() {
 
   // Handle --uninstall
   if (values.uninstall) {
+    let uninstalled = false
     if (projectConfigExists(projectDir)) {
       removeProjectConfig(projectDir)
-      console.log('✅ Project configuration removed.')
+      console.log('✅ Project configuration removed (.opencode-tele)')
+      uninstalled = true
+    }
+
+    const binaryPath = '/usr/local/bin/opencode-tele'
+    if (existsSync(binaryPath)) {
+      console.log(`\nTo completely remove the global binary, run:\n  sudo rm ${binaryPath}\n`)
+      uninstalled = true
+    }
+
+    if (!uninstalled) {
+      console.log('No project configuration or global binary found.')
     } else {
-      console.log('No project configuration found.')
+      console.log('Done.')
     }
     process.exit(0)
   }

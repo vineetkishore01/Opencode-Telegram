@@ -82,9 +82,6 @@ export class OpenCodeClient {
         try {
           return JSON.parse(responseText) as T
         } catch (e) {
-          // If we expected JSON but got something else, and it's not a success code,
-          // we should have already thrown above. If it IS a success code but not JSON,
-          // return as is (could be a plain string response).
           log.debug('Response is not JSON', { endpoint, length: responseText.length })
           return responseText as any
         }
@@ -298,94 +295,6 @@ export class OpenCodeClient {
       return await this.request(`/session/${sessionId}/diff`)
     } catch {
       return []
-    }
-  }
-
-  async *subscribeToEvents(): AsyncGenerator<any> {
-    const url = `${this.baseUrl}/event`
-    const headers: Record<string, string> = {
-      'Accept': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    }
-
-    if (this.auth) {
-      const credentials = btoa(`${this.auth.username}:${this.auth.password}`)
-      headers['Authorization'] = `Basic ${credentials}`
-    }
-
-    const log = getLogger()
-    log.info('Connecting to event stream', { url })
-
-    try {
-      // Use undici fetch with the custom agent for SSE
-      const response = await fetch(url, { 
-        headers,
-        dispatcher: sseAgent,
-      })
-
-      if (!response.ok) {
-        throw new Error(`Failed to subscribe to events: ${response.status} ${response.statusText}`)
-      }
-
-      const reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
-      }
-
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) {
-          log.info('Event stream connection closed by server')
-          break
-        }
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          const trimmedLine = line.trim()
-          if (!trimmedLine) continue
-
-          if (trimmedLine.startsWith('data: ')) {
-            const data = trimmedLine.slice(6)
-            if (data.trim() && data !== '[DONE]') {
-              try {
-                const event = JSON.parse(data)
-                if (event.type !== 'server.heartbeat') {
-                  yield event
-                }
-              } catch (e) {
-                log.debug('Failed to parse event data', { data, error: (e as Error).message })
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      // Re-throw to be handled by EventProcessor backoff logic
-      throw error
-    }
-  }
-}
-a)
-                if (event.type !== 'server.heartbeat') {
-                  yield event
-                }
-              } catch (e) {
-                log.debug('Failed to parse event data', { data, error: (e as Error).message })
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      // Re-throw to be handled by EventProcessor backoff logic
-      throw error
     }
   }
 }
