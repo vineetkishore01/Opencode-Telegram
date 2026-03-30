@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { config } from 'dotenv'
 import { parseArgs } from 'util'
 import { resolve } from 'path'

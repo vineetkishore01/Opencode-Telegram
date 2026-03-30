@@ -3,15 +3,8 @@
   "version": "0.0.9",
   "description": "Telegram bot for OpenCode remote development",
   "main": "dist/index.js",
-  "bin": "dist/index.js",
-  "pkg": {
-    "assets": [
-      "dist/**/*.js"
-    ],
-    "targets": [
-      "node18-macos-x64"
-    ],
-    "outputPath": "bin"
+  "bin": {
+    "opencode-tele": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
