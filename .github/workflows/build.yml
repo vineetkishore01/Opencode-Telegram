@@ -46,17 +46,23 @@ jobs:
       - name: Install pkg
         run: npm install -g pkg
 
+      - name: Create binaries directory
+        run: mkdir -p binaries
+
       - name: Build Linux binary
-        run: npx pkg . --targets node18-linux-x64 --output-path binaries --output opencode-tele-linux-x64
+        run: pkg dist/index.js --targets node18-linux-x64 --output binaries/opencode-tele-linux-x64
 
       - name: Build macOS binary
-        run: npx pkg . --targets node18-macos-x64 --output-path binaries --output opencode-tele-macos-x64
+        run: pkg dist/index.js --targets node18-macos-x64 --output binaries/opencode-tele-macos-x64
 
       - name: Build Windows binary
-        run: npx pkg . --targets node18-win-x64 --output-path binaries --output opencode-tele-win-x64.exe
+        run: pkg dist/index.js --targets node18-win-x64 --output binaries/opencode-tele-win-x64.exe
 
       - name: Make binaries executable
         run: chmod +x binaries/opencode-tele-linux-x64 binaries/opencode-tele-macos-x64
+
+      - name: List binaries
+        run: ls -la binaries/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
