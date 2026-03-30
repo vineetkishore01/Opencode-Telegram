@@ -72,8 +72,11 @@ export class EventProcessor {
             for (const msg of messages) {
               if (msg.parts) {
                 for (const part of msg.parts) {
-                  const partKey = `${sessionId}:${part.id}`
+                  // Use a more robust key: sessionId + messageId + partId + type
+                  const partKey = `${sessionId}:${msg.id}:${part.id || 'no-id'}:${part.type}`
+                  
                   if (!this.processedPartIds.has(partKey)) {
+                    log.debug('New message part detected', { partKey, type: part.type })
                     // New part found! Process it as an event
                     await this.handleMessagePartUpdated({ part })
                     this.processedPartIds.add(partKey)
@@ -174,12 +177,19 @@ export class EventProcessor {
     const part = event.part
     if (!part) return
 
+    const log = getLogger()
     const chatId = this.stateManager.getChatIdForSession(part.sessionID)
-    if (!chatId) return
+    if (!chatId) {
+      log.debug('Part received for session not owned by bot', { sessionID: part.sessionID })
+      return
+    }
+
+    log.debug('Processing message part', { type: part.type, sessionID: part.sessionID })
 
     if (part.type === 'reasoning' && part.time?.end && part.text?.trim()) {
       const thinking = part.text.trim()
       if (thinking) {
+        log.debug('Sending reasoning to Telegram', { length: thinking.length })
         const maxLen = 2000
         const displayText = thinking.length > maxLen
           ? thinking.substring(0, maxLen) + '...'
@@ -198,10 +208,14 @@ export class EventProcessor {
     }
 
     if (part.type === 'text' && part.time?.end && part.text?.trim()) {
-      if (part.ignored || part.synthetic) return
+      if (part.ignored || part.synthetic) {
+        log.debug('Ignoring synthetic or ignored text part', { partID: part.id })
+        return
+      }
 
       const text = stripAnsi(part.text.trim())
       if (text) {
+        log.debug('Sending response text to Telegram', { length: text.length })
         const chunks = splitMessage(`📝 *Response:*\n${escapeMarkdown(text)}`)
         for (const chunk of chunks) {
           await this.bot.api.sendMessage(chatId, chunk, { parse_mode: 'Markdown' }).catch(() => {})
