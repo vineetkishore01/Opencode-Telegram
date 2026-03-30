@@ -33,7 +33,7 @@ export function getProjectLogPath(projectDir: string): string {
 }
 
 export function projectConfigExists(projectDir: string): boolean {
-  return existsSync(getProjectConfigPath(projectDir))
+  return existsSync(getProjectConfigDir(projectDir))
 }
 
 export function loadProjectConfig(projectDir: string): ProjectConfig | null {

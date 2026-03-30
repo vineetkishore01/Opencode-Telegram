@@ -128,7 +128,9 @@ export class OpenCodeServer {
               : `OpenCode server exited with code ${code}. Error: ${errorOutput}`
             reject(new Error(errorMsg))
           } else {
-            log.info('OpenCode server process exited', { code })
+            const msg = `⚠️ OpenCode server process exited with code ${code}`
+            log.warn(msg)
+            console.warn(`\n${msg}`)
           }
         })
 
