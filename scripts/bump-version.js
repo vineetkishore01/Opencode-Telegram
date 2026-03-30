@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'fs'
+const { readFileSync, writeFileSync } = require('fs')
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf-8'))
 const [x, y, z] = pkg.version.split('.').map(Number)
