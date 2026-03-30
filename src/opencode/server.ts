@@ -83,8 +83,18 @@ export class OpenCodeServer {
         this.process = spawn('opencode', ['serve', '--port', this.port.toString()], {
           cwd: this.projectDir,
           stdio: ['ignore', 'pipe', 'pipe'],
-          detached: false,
+          detached: false, // Ensure it's in the same process group
         })
+
+        // Force cleanup on main process exit
+        const onExit = () => {
+          if (this.process) {
+            this.process.kill('SIGKILL')
+          }
+        }
+        process.on('exit', onExit)
+        process.on('SIGINT', onExit)
+        process.on('SIGTERM', onExit)
 
         let started = false
         let errorOutput = ''

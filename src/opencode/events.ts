@@ -41,7 +41,7 @@ export class EventProcessor {
         // 1. Check for pending permissions
         await this.permissionHandler.checkPendingPermissions().catch(() => {})
 
-        // 2. Poll active sessions for new message parts
+        // 2. Poll active sessions for new message parts and status
         const chatIds = this.stateManager.getAllChatIds()
         for (const chatId of chatIds) {
           if (!this.running) break
@@ -49,6 +49,14 @@ export class EventProcessor {
           if (!sessionId) continue
 
           try {
+            // Fetch session info to check status
+            const session = await this.client.getSession(sessionId)
+            
+            // Check status: if we were busy and now it's idle, trigger idle handler
+            if (this.messageQueue.isBusy(chatId) && (session as any).status?.type === 'idle') {
+              await this.handleSessionIdle({ sessionID: sessionId })
+            }
+
             // Fetch last few messages to see if there are updates
             const messages = await this.client.getMessages(sessionId, 3)
             
