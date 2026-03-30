@@ -1,14 +1,11 @@
 #!/usr/bin/env node
 
-import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
-import { existsSync } from 'fs'
+const path = require('path')
+const fs = require('fs')
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
-const distPath = join(__dirname, '..', 'dist', 'index.js')
+const distPath = path.join(__dirname, '..', 'dist', 'index.js')
 
-if (!existsSync(distPath)) {
+if (!fs.existsSync(distPath)) {
   console.error('\n  ❌ Build output not found.')
   console.error('  Run the following first:\n')
   console.error('    npm install && npm run build\n')
@@ -17,7 +14,4 @@ if (!existsSync(distPath)) {
   process.exit(1)
 }
 
-import(distPath).catch((error) => {
-  console.error('Failed to start:', error.message)
-  process.exit(1)
-})
+require(distPath)
