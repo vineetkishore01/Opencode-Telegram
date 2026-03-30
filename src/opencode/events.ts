@@ -22,6 +22,8 @@ export class EventProcessor {
     private messageQueue: MessageQueue
   ) {}
 
+  private processedPartIds = new Set<string>()
+
   async start(): Promise<void> {
     if (this.running) return
     this.running = true
@@ -29,7 +31,7 @@ export class EventProcessor {
     const log = getLogger()
     log.info('Event processor started (Polling mode)')
 
-    // Initial delay to let server fully settle (AI models, internal db, etc)
+    // Initial delay to let server fully settle
     console.log('⏳ Waiting 10s for OpenCode server to initialize...')
     await new Promise(resolve => setTimeout(resolve, 10000))
     console.log('✅ Initialization wait complete.')
@@ -39,27 +41,46 @@ export class EventProcessor {
         // 1. Check for pending permissions
         await this.permissionHandler.checkPendingPermissions().catch(() => {})
 
-        // 2. Check status for all active sessions
+        // 2. Poll active sessions for new message parts
         const chatIds = this.stateManager.getAllChatIds()
         for (const chatId of chatIds) {
           if (!this.running) break
           const sessionId = this.stateManager.getCurrentSession(chatId)
           if (!sessionId) continue
 
-          // Poll for latest messages/parts if we're busy
-          if (this.messageQueue.isBusy(chatId)) {
-            try {
-              // Just a lightweight check to see if we're still connected
-              await this.client.getSession(sessionId)
-            } catch (e) {
-              // If session fails, mark as idle to stop polling
-              this.messageQueue.setIdle(chatId)
+          try {
+            // Fetch last few messages to see if there are updates
+            const messages = await this.client.getMessages(sessionId, 3)
+            
+            // Iterate through messages and their parts
+            for (const msg of messages) {
+              if (msg.parts) {
+                for (const part of msg.parts) {
+                  const partKey = `${sessionId}:${part.id}`
+                  if (!this.processedPartIds.has(partKey)) {
+                    // New part found! Process it as an event
+                    await this.handleMessagePartUpdated({ part })
+                    this.processedPartIds.add(partKey)
+                  }
+                }
+              }
             }
+
+            // Periodically clean up processedPartIds to prevent memory leak
+            if (this.processedPartIds.size > 1000) {
+              const items = Array.from(this.processedPartIds)
+              for (const item of items.slice(0, 500)) {
+                this.processedPartIds.delete(item)
+              }
+            }
+
+          } catch (e) {
+            // Silent poll errors
           }
         }
 
-        // Wait 2.5 seconds between polls to be less aggressive
-        await new Promise(resolve => setTimeout(resolve, 2500))
+        // Wait 2 seconds between polls
+        await new Promise(resolve => setTimeout(resolve, 2000))
       } catch (error) {
         log.error('Polling error', { error: (error as Error).message })
         await new Promise(resolve => setTimeout(resolve, 5000))
