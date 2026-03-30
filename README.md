@@ -1,128 +1,61 @@
 # OpenCode Telegram Bot
 
-Remote development with [OpenCode](https://opencode.ai/) via Telegram. Code from your phone.
+Control your [OpenCode](https://github.com/opencode-ai/opencode) server from anywhere using Telegram. This bot allows you to prompt OpenCode, manage sessions, browse files, and approve permissions directly from your phone or desktop.
 
-## Install
+## 🚀 Quick Start
 
-### macOS / Linux
+### 1. Prerequisites
+- [Node.js](https://nodejs.org/) (v18 or higher)
+- [OpenCode](https://github.com/opencode-ai/opencode) installed globally (`npm install -g opencode-ai`)
+
+### 2. Installation
+Clone this repository and install it globally on your system:
 
 ```bash
-# Download
-curl -L https://github.com/vineetkishore01/Opencode-Telegram/releases/latest/download/opencode-tele-macos-x64 -o opencode-tele
-
-# Make executable
-chmod +x opencode-tele
-
-# Move to PATH
-sudo mv opencode-tele /usr/local/bin/opencode-tele
+git clone https://github.com/vineetkishore01/Opencode-Telegram.git
+cd Opencode-Telegram/opencode-telegram-bot
+npm install
+npm run build
+sudo npm install -g .
 ```
 
-### Windows
-
-Download `opencode-tele-win-x64.exe` from [Releases](https://github.com/vineetkishore01/Opencode-Telegram/releases), rename to `opencode-tele.exe`, add to PATH.
-
-### npm
+### 3. Usage
+Navigate to any project directory where you want to use OpenCode and run:
 
 ```bash
-npm install -g opencode-tele
-```
-
-## Prerequisites
-
-```bash
-npm install -g opencode-ai
-```
-
-## Usage
-
-```bash
-cd /your/project
 opencode-tele
 ```
 
-First run in each project asks for:
-- **Telegram bot token** — create via [@BotFather](https://t.me/BotFather)
-- **Your user ID** — get from [@userinfobot](https://t.me/userinfobot)
+**First Run Setup:**
+The bot will guide you through setting up your Telegram Bot Token and Authorized User ID. 
+- Get a token from [@BotFather](https://t.me/botfather)
+- Get your User ID from [@userinfobot](https://t.me/userinfobot)
 
-Credentials saved to `<project>/.opencode-tele/config.json`. Next runs pick up automatically.
-
-## Per-Project Config
-
-Each project gets its own `.opencode-tele/` folder:
-
-```
-your-project/
-└── .opencode-tele/
-    ├── config.json    # Bot token, user ID
-    ├── state.json     # Sessions, model selections, costs
-    └── bot.log        # Logs
-```
-
-Different projects = different bots, different chats, different models.
-
-## Commands
+## 🛠 Commands
 
 | Command | Description |
 |---------|-------------|
-| `/session` | Create new session |
-| `/sessions` | List recent sessions |
-| `/continue` | Pick a session interactively |
-| `/status` | Show current session, model, cost |
-| `/abort` | Stop running task |
-| `/clear` | Reset session/model/mode |
-| `/providers` | List AI providers |
-| `/models <provider>` | List models for provider |
-| `/model <provider> <name>` | Select model |
-| `/mode` | Show/set mode (build, plan, etc.) |
-| `/modes` | List available modes |
-| `/files [path]` | List files in directory |
-| `/file <path>` | View file content |
-| `/find <pattern>` | Search code |
-| `/cost` | Show cost tracking |
-| `/todo` | Show AI task list |
-| `/diff` | Show file changes |
+| `/session` | Create a new OpenCode session |
+| `/sessions` | List 10 most recent sessions |
+| `/status` | Show current session, model, and mode |
+| `/abort` | Stop the currently running task |
+| `/files` | List files in the current project |
+| `/cost` | Show token usage and cost for the session |
+| `/help` | Show all available commands |
 
-Just send any message to prompt OpenCode. Multiple messages are queued automatically.
-
-## CLI Options
-
-```
-  -d, --directory <path>  Project directory (default: current)
-  -p, --port <port>       OpenCode server port (default: 4097)
-  --no-server             Connect to existing OpenCode server
-  --check                 Verify OpenCode installation and project config
-  --uninstall             Remove this project's configuration
-  -h, --help              Show help
-```
-
-## Reconfigure
+## 🧹 Uninstallation
+To completely remove the bot and its configurations:
 
 ```bash
-opencode-tele --uninstall   # Remove this project's config
-opencode-tele               # Re-run setup for this project
+# Remove global command
+sudo npm uninstall -g opencode-tele
+
+# Clean up project-specific configs
+opencode-tele --uninstall
 ```
 
-## What You Get in Telegram
+## ⚙️ Configuration
+The bot saves project-specific configurations in a `.opencode-tele/` directory within your project folder. This includes your bot token, authorized user ID, and session state.
 
-- **Thinking** — AI reasoning shown as `🤔 Thinking: ...`
-- **Tool execution** — bash, edit, write, read, grep with icons
-- **File changes** — `📘 Edited: src/index.ts`
-- **Permissions** — inline buttons: ✅ Once / 🔄 Always / ❌ Reject
-- **Questions** — AI multi-choice questions, tap to answer
-- **Costs** — tokens and cost after each response
-- **Errors** — `⚠️ ErrorName: message`
-- **Retries** — `🔄 Retry 2: timeout`
-- **Todo lists** — `📋` with status icons
-- **Compaction** — `📦 Context compacted` when context is summarized
-
-## How It Works
-
-```
-You (Telegram) → Telegram Bot → OpenCode Server
-                                      ↓
-                 Real-time ← SSE Events
-```
-
-## License
-
-MIT
+---
+MIT License
