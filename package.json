@@ -7,32 +7,13 @@
   "bin": {
     "opencode-tele": "./bin/opencode-tele.js"
   },
-  "pkg": {
-    "targets": [
-      "node18-linux-x64",
-      "node18-macos-x64",
-      "node18-win-x64"
-    ],
-    "outputPath": "binaries",
-    "assets": [],
-    "scripts": [
-      "dist/**/*.js"
-    ]
-  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "install-global": "npm run build && npm install -g .",
-    "uninstall-global": "npm uninstall -g opencode-tele",
-    "bump-version": "node scripts/bump-version.js",
-    "build:binary": "pkg . --output-path binaries",
-    "build:binary:linux": "pkg . --targets node18-linux-x64 --output-path binaries",
-    "build:binary:macos": "pkg . --targets node18-macos-x64 --output-path binaries",
-    "build:binary:windows": "pkg . --targets node18-win-x64 --output-path binaries",
-    "build:binaries": "npm run build && npm run build:binary",
-    "prepublish": "npm run build && npm run bump-version"
+    "uninstall-global": "npm uninstall -g opencode-tele"
   },
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.0",
