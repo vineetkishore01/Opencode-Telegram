@@ -53,10 +53,12 @@ export class TelegramBot {
     })
 
     // Start bot
-    log.info('Starting Telegram bot...')
+    console.log('📡 Connecting to Telegram...')
     await this.bot.start({
-      onStart: () => {
-        log.info('Telegram bot started')
+      onStart: (info) => {
+        const msg = `✅ Telegram bot started as @${info.username}`
+        log.info(msg)
+        console.log(msg)
       },
     })
   }
