@@ -1,0 +1,55 @@
+{
+  "name": "opencode-tele",
+  "version": "0.0.1",
+  "description": "Telegram bot for OpenCode remote development",
+  "main": "dist/index.js",
+  "type": "module",
+  "bin": {
+    "opencode-tele": "./bin/opencode-tele.js"
+  },
+  "pkg": {
+    "targets": [
+      "node18-linux-x64",
+      "node18-macos-x64",
+      "node18-win-x64"
+    ],
+    "outputPath": "binaries",
+    "assets": [],
+    "scripts": [
+      "dist/**/*.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "install-global": "npm run build && npm install -g .",
+    "uninstall-global": "npm uninstall -g opencode-tele",
+    "bump-version": "node scripts/bump-version.js",
+    "build:binary": "pkg . --output-path binaries",
+    "build:binary:linux": "pkg . --targets node18-linux-x64 --output-path binaries",
+    "build:binary:macos": "pkg . --targets node18-macos-x64 --output-path binaries",
+    "build:binary:windows": "pkg . --targets node18-win-x64 --output-path binaries",
+    "build:binaries": "npm run build && npm run build:binary",
+    "prepublish": "npm run build && npm run bump-version"
+  },
+  "dependencies": {
+    "@grammyjs/auto-retry": "^2.0.0",
+    "dotenv": "^16.3.1",
+    "grammy": "^1.21.0",
+    "undici": "^6.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "pkg": "^5.8.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  },
+  "keywords": ["opencode", "telegram", "bot", "ai", "development"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

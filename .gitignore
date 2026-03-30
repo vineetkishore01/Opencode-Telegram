@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+binaries/
+*.exe
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# State files
+*.json.bak
+.opencode-tele-state.json
+.opencode-tele.log
+
+# Log files
+*.log
+logs/
+.opencode-tele.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TypeScript
+*.tsbuildinfo

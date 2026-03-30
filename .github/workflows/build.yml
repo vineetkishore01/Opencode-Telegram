@@ -1,0 +1,91 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Bump version
+        id: version
+        run: |
+          NEW_VERSION=$(node scripts/bump-version.js)
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Bumped to $NEW_VERSION"
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "bump to ${{ steps.version.outputs.version }}" || true
+          git push
+
+      - name: Install pkg
+        run: npm install -g pkg
+
+      - name: Build Linux binary
+        run: npx pkg . --targets node18-linux-x64 --output-path binaries --output opencode-tele-linux-x64
+
+      - name: Build macOS binary
+        run: npx pkg . --targets node18-macos-x64 --output-path binaries --output opencode-tele-macos-x64
+
+      - name: Build Windows binary
+        run: npx pkg . --targets node18-win-x64 --output-path binaries --output opencode-tele-win-x64.exe
+
+      - name: Make binaries executable
+        run: chmod +x binaries/opencode-tele-linux-x64 binaries/opencode-tele-macos-x64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body: |
+            ## OpenCode Telegram Bot v${{ steps.version.outputs.version }}
+
+            ### Download
+
+            | Platform | Binary |
+            |----------|--------|
+            | Linux x64 | `opencode-tele-linux-x64` |
+            | macOS x64 | `opencode-tele-macos-x64` |
+            | Windows x64 | `opencode-tele-win-x64.exe` |
+
+            ### Quick Start
+
+            ```bash
+            # Linux
+            chmod +x opencode-tele-linux-x64
+            sudo mv opencode-tele-linux-x64 /usr/local/bin/opencode-tele
+
+            # macOS
+            chmod +x opencode-tele-macos-x64
+            sudo mv opencode-tele-macos-x64 /usr/local/bin/opencode-tele
+            ```
+
+            Then run `opencode-tele` from any project directory.
+          files: |
+            binaries/opencode-tele-linux-x64
+            binaries/opencode-tele-macos-x64
+            binaries/opencode-tele-win-x64.exe
+          generate_release_notes: true
