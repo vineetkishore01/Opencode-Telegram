@@ -1,4 +1,4 @@
-import { fetch } from 'undici'
+import * as http from 'http'
 import { SessionInfo, MessageInfo, PermissionRequest, PermissionReply } from '../types/index.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -30,81 +30,95 @@ async function sleep(ms: number): Promise<void> {
 export class OpenCodeClient {
   private baseUrl: string
   private auth?: { username: string; password: string }
+  private hostname: string
+  private port: number
 
   constructor(baseUrl: string, auth?: { username: string; password: string }) {
     this.baseUrl = baseUrl.replace(/\/$/, '')
     this.auth = auth
+    
+    const url = new URL(this.baseUrl)
+    this.hostname = url.hostname
+    this.port = parseInt(url.port) || 80
   }
 
   private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'Connection': 'close', // Don't keep-alive to avoid "terminated" issues
     }
     if (this.auth) {
-      const credentials = btoa(`${this.auth.username}:${this.auth.password}`)
+      const credentials = Buffer.from(`${this.auth.username}:${this.auth.password}`).toString('base64')
       headers['Authorization'] = `Basic ${credentials}`
     }
     return headers
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}, retries = MAX_RETRIES): Promise<T> {
-    const url = `${this.baseUrl}${endpoint}`
+  private async request<T>(endpoint: string, options: any = {}, retries = MAX_RETRIES): Promise<T> {
     const method = options.method || 'GET'
-    const headers = { ...this.buildHeaders(), ...(options.headers as Record<string, string> || {}) }
+    const headers = { ...this.buildHeaders(), ...(options.headers || {}) }
     const log = getLogger()
-
-    let lastError: Error | null = null
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
-
-        const response = await fetch(url, {
-          ...options,
-          headers,
-          signal: controller.signal,
-        })
-
-        clearTimeout(timeoutId)
-        const responseText = await response.text()
-
-        if (!response.ok) {
-          const errorBody = responseText.substring(0, 200)
-          log.error('API Error', { method, url, status: response.status, body: errorBody })
-          throw new Error(`OpenCode API error: ${response.status} ${response.statusText}`)
-        }
-
-        if (!responseText || responseText.trim() === '') {
-          return {} as T
-        }
-
-        try {
-          return JSON.parse(responseText) as T
-        } catch (e) {
-          log.debug('Response is not JSON', { endpoint, length: responseText.length })
-          return responseText as any
-        }
-      } catch (error) {
-        lastError = error as Error
-        const isAbort = (error as Error).name === 'AbortError'
-        const isRetryable = isAbort || (error as any).code === 'ECONNRESET' || (error as any).code === 'ECONNREFUSED'
-
-        if (!isRetryable || attempt >= retries) {
-          if ((error as Error).message?.includes('OpenCode API error')) {
-            throw error
+        return await new Promise((resolve, reject) => {
+          const reqOptions = {
+            hostname: this.hostname,
+            port: this.port,
+            path: endpoint,
+            method: method,
+            headers: headers,
+            timeout: REQUEST_TIMEOUT,
           }
-          log.error('API Request Failed', { method, url, error: (error as Error).message, attempt })
-          throw error
-        }
+
+          const req = http.request(reqOptions, (res) => {
+            let data = ''
+            res.on('data', (chunk) => { data += chunk })
+            res.on('end', () => {
+              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                if (!data || data.trim() === '') {
+                  resolve({} as T)
+                  return
+                }
+                try {
+                  resolve(JSON.parse(data) as T)
+                } catch {
+                  resolve(data as any)
+                }
+              } else {
+                reject(new Error(`OpenCode API error: ${res.statusCode} ${res.statusMessage}`))
+              }
+            })
+          })
+
+          req.on('error', (err) => reject(err))
+          req.on('timeout', () => {
+            req.destroy()
+            reject(new Error('Request timeout'))
+          })
+
+          if (options.body) {
+            req.write(options.body)
+          }
+          req.end()
+        })
+      } catch (error) {
+        const isRetryable = attempt < retries && (
+          (error as any).code === 'ECONNRESET' || 
+          (error as any).code === 'ECONNREFUSED' || 
+          (error as Error).message === 'terminated' ||
+          (error as Error).message === 'Request timeout'
+        )
+
+        if (!isRetryable) throw error
 
         const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
-        log.warn(`API request failed, retrying in ${delay}ms`, { method, url, attempt: attempt + 1, error: (error as Error).message })
+        log.warn(`API request failed, retrying in ${delay}ms`, { method, endpoint, attempt: attempt + 1, error: (error as Error).message })
         await sleep(delay)
       }
     }
 
-    throw lastError || new Error('Request failed after retries')
+    throw new Error('Request failed after retries')
   }
 
   async createSession(directory?: string): Promise<SessionInfo> {
