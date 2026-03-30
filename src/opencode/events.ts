@@ -9,6 +9,10 @@ import { getLogger } from '../utils/logger.js'
 export class EventProcessor {
   private running = false
   private workingSessions = new Map<string, { chatId: number; messageId: number }>()
+  private reconnectDelay = 1000
+  private maxReconnectDelay = 30000
+  private consecutiveErrors = 0
+  private maxConsecutiveErrors = 10
 
   constructor(
     private client: OpenCodeClient,
@@ -28,12 +32,28 @@ export class EventProcessor {
       try {
         for await (const event of this.client.subscribeToEvents()) {
           if (!this.running) break
+          this.consecutiveErrors = 0
+          this.reconnectDelay = 1000
           await this.handleEvent(event)
         }
       } catch (error) {
-        log.error('Event stream disconnected, reconnecting...')
+        this.consecutiveErrors++
+        
+        if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
+          log.error('Too many consecutive connection failures, stopping event processor')
+          this.running = false
+          break
+        }
+
+        if (this.consecutiveErrors === 1) {
+          log.error('Event stream disconnected, will retry with backoff')
+        } else {
+          log.warn(`Event stream reconnection attempt ${this.consecutiveErrors}/${this.maxConsecutiveErrors}`)
+        }
+
         if (this.running) {
-          await new Promise(resolve => setTimeout(resolve, 5000))
+          await new Promise(resolve => setTimeout(resolve, this.reconnectDelay))
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay)
         }
       }
     }
@@ -110,7 +130,6 @@ export class EventProcessor {
     const chatId = this.stateManager.getChatIdForSession(part.sessionID)
     if (!chatId) return
 
-    // Show reasoning/thinking (only when complete)
     if (part.type === 'reasoning' && part.time?.end && part.text?.trim()) {
       const thinking = part.text.trim()
       if (thinking) {
@@ -127,14 +146,11 @@ export class EventProcessor {
       }
     }
 
-    // Show tool execution states
     if (part.type === 'tool') {
       await this.handleToolPart(chatId, part)
     }
 
-    // Show completed text responses
     if (part.type === 'text' && part.time?.end && part.text?.trim()) {
-      // Skip ignored or synthetic text
       if (part.ignored || part.synthetic) return
 
       const text = stripAnsi(part.text.trim())
@@ -146,17 +162,14 @@ export class EventProcessor {
       }
     }
 
-    // Show file parts (attachments from AI)
     if (part.type === 'file') {
       await this.handleFilePart(chatId, part)
     }
 
-    // Show step completion with cost/tokens including cache
     if (part.type === 'step-finish') {
       await this.handleStepFinish(chatId, part)
     }
 
-    // Show retry attempts
     if (part.type === 'retry') {
       const attempt = part.attempt || '?'
       const error = stripAnsi(part.error?.message || 'Unknown error')
@@ -167,7 +180,6 @@ export class EventProcessor {
       await this.bot.api.sendMessage(chatId, retryMsg, { parse_mode: 'Markdown' }).catch(() => {})
     }
 
-    // Show subtask delegation
     if (part.type === 'subtask') {
       const desc = part.description || part.prompt?.substring(0, 100) || 'subtask'
       const agent = part.agent ? ` (${escapeMarkdown(part.agent)})` : ''
@@ -178,7 +190,6 @@ export class EventProcessor {
       ).catch(() => {})
     }
 
-    // Show agent invocations
     if (part.type === 'agent') {
       const name = part.name || 'agent'
       await this.bot.api.sendMessage(
@@ -188,7 +199,6 @@ export class EventProcessor {
       ).catch(() => {})
     }
 
-    // Show compaction notifications
     if (part.type === 'compaction') {
       const reason = part.overflow ? 'context overflow' : 'auto'
       await this.bot.api.sendMessage(
@@ -198,7 +208,6 @@ export class EventProcessor {
       ).catch(() => {})
     }
 
-    // Show patch (file changes summary)
     if (part.type === 'patch') {
       const files = part.state?.files || []
       if (files.length > 0) {
@@ -234,7 +243,6 @@ export class EventProcessor {
       let message = `${icon} ${formattedName}`
       if (title) message += `: ${escapeMarkdown(title)}`
 
-      // For bash, show truncated output
       if (toolName === 'bash' && output) {
         const cleanOutput = stripAnsi(output).trim()
         if (cleanOutput) {
@@ -257,7 +265,6 @@ export class EventProcessor {
     const filename = part.filename || part.source?.path || 'file'
     const icon = getFileIcon(filename)
 
-    // Show file info with icon
     let message = `${icon} \`${escapeMarkdown(filename)}\``
     if (part.source?.text?.value) {
       const snippet = part.source.text.value.substring(0, 150).trim()
@@ -288,7 +295,6 @@ export class EventProcessor {
         info += ` • $${cost.toFixed(4)}`
       }
 
-      // Track cost in state
       const sessionId = part.sessionID
       if (sessionId) {
         this.stateManager.addCost(
@@ -385,7 +391,6 @@ export class EventProcessor {
     const info = event.info
     if (!info) return
 
-    // Show title update
     if (info.title) {
       await this.bot.api.sendMessage(
         chatId,
@@ -394,7 +399,6 @@ export class EventProcessor {
       ).catch(() => {})
     }
 
-    // Show summary changes
     if (info.summary) {
       const s = info.summary
       if (s.additions || s.deletions) {
@@ -493,7 +497,6 @@ export class EventProcessor {
     const chatId = this.stateManager.getChatIdForSession(sessionID)
     if (!chatId) return
 
-    // Update the "working" message if it exists
     const working = this.workingSessions.get(sessionID)
     if (working) {
       await this.bot.api.editMessageText(
@@ -504,10 +507,8 @@ export class EventProcessor {
       this.workingSessions.delete(sessionID)
     }
 
-    // Mark session as idle in queue
     this.messageQueue.setIdle(chatId)
 
-    // Process next queued message if any
     const next = this.messageQueue.dequeue(chatId)
     if (next) {
       this.messageQueue.setBusy(chatId)
@@ -530,7 +531,6 @@ export class EventProcessor {
         next.reject(error as Error)
       }
     } else {
-      // No queued messages, send completion notification
       await this.bot.api.sendMessage(chatId, '✅ *Done!*', { parse_mode: 'Markdown' }).catch(() => {})
     }
   }

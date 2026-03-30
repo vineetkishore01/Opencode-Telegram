@@ -345,7 +345,7 @@ export class OpenCodeClient {
         }
       }
     } catch (error) {
-      log.error('Event stream error', { error: (error as Error).message })
+      // Don't log here - events.ts handles reconnection logging
       throw error
     }
   }
