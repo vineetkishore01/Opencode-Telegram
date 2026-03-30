@@ -11,15 +11,8 @@ binaries/
 .env.local
 .env.*.local
 
-# State files
-*.json.bak
-.opencode-tele-state.json
-.opencode-tele.log
-
-# Log files
-*.log
-logs/
-.opencode-tele.log
+# Per-project OpenCode Tele config/state/logs
+.opencode-tele/
 
 # IDE
 .vscode/

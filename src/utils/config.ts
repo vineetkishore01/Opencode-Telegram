@@ -1,50 +1,65 @@
 import { BotConfig } from '../types/index.js'
 import { join } from 'path'
-import { homedir } from 'os'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, rmdirSync, readdirSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
 
-const GLOBAL_CONFIG_DIR = join(homedir(), '.opencode-tele')
-const GLOBAL_CONFIG_FILE = join(GLOBAL_CONFIG_DIR, 'config.json')
+const PROJECT_CONFIG_DIR = '.opencode-tele'
+const PROJECT_CONFIG_FILE = 'config.json'
+const PROJECT_STATE_FILE = 'state.json'
+const PROJECT_LOG_FILE = 'bot.log'
 
-export interface GlobalConfig {
+export interface ProjectConfig {
   telegramToken: string
   authorizedUserId: string
+  openCodeUrl?: string
+  openCodeUsername?: string
+  openCodePassword?: string
+  logLevel?: 'debug' | 'info' | 'warn' | 'error'
 }
 
-export function loadGlobalConfig(): GlobalConfig | null {
+export function getProjectConfigDir(projectDir: string): string {
+  return join(projectDir, PROJECT_CONFIG_DIR)
+}
+
+export function getProjectConfigPath(projectDir: string): string {
+  return join(projectDir, PROJECT_CONFIG_DIR, PROJECT_CONFIG_FILE)
+}
+
+export function getProjectStatePath(projectDir: string): string {
+  return join(projectDir, PROJECT_CONFIG_DIR, PROJECT_STATE_FILE)
+}
+
+export function getProjectLogPath(projectDir: string): string {
+  return join(projectDir, PROJECT_CONFIG_DIR, PROJECT_LOG_FILE)
+}
+
+export function projectConfigExists(projectDir: string): boolean {
+  return existsSync(getProjectConfigPath(projectDir))
+}
+
+export function loadProjectConfig(projectDir: string): ProjectConfig | null {
   try {
-    if (existsSync(GLOBAL_CONFIG_FILE)) {
-      const data = readFileSync(GLOBAL_CONFIG_FILE, 'utf-8')
+    const configPath = getProjectConfigPath(projectDir)
+    if (existsSync(configPath)) {
+      const data = readFileSync(configPath, 'utf-8')
       return JSON.parse(data)
     }
-  } catch (error) {
+  } catch {
     // Config doesn't exist or is invalid
   }
   return null
 }
 
-export function saveGlobalConfig(config: GlobalConfig): void {
-  mkdirSync(GLOBAL_CONFIG_DIR, { recursive: true })
-  writeFileSync(GLOBAL_CONFIG_FILE, JSON.stringify(config, null, 2))
+export function saveProjectConfig(projectDir: string, config: ProjectConfig): void {
+  const configDir = getProjectConfigDir(projectDir)
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(getProjectConfigPath(projectDir), JSON.stringify(config, null, 2))
 }
 
-export function globalConfigExists(): boolean {
-  return existsSync(GLOBAL_CONFIG_FILE)
-}
-
-export function hasCredentials(): boolean {
-  if (process.env.TELEGRAM_BOT_TOKEN && process.env.AUTHORIZED_USER_ID) return true
-  const global = loadGlobalConfig()
-  return !!(global?.telegramToken && global?.authorizedUserId)
-}
-
-export function removeGlobalConfig(): boolean {
+export function removeProjectConfig(projectDir: string): boolean {
   try {
-    if (existsSync(GLOBAL_CONFIG_FILE)) {
-      unlinkSync(GLOBAL_CONFIG_FILE)
-    }
-    if (existsSync(GLOBAL_CONFIG_DIR) && readdirSync(GLOBAL_CONFIG_DIR).length === 0) {
-      rmdirSync(GLOBAL_CONFIG_DIR)
+    const configDir = getProjectConfigDir(projectDir)
+    if (existsSync(configDir)) {
+      rmSync(configDir, { recursive: true, force: true })
     }
     return true
   } catch {
@@ -52,21 +67,26 @@ export function removeGlobalConfig(): boolean {
   }
 }
 
-export function loadConfig(projectDir: string): BotConfig {
-  const stateFile = join(projectDir, '.opencode-tele-state.json')
-  const logFile = join(projectDir, '.opencode-tele.log')
+export function hasCredentials(projectDir: string): boolean {
+  // Check env vars first
+  if (process.env.TELEGRAM_BOT_TOKEN && process.env.AUTHORIZED_USER_ID) return true
+  // Then check project config
+  const config = loadProjectConfig(projectDir)
+  return !!(config?.telegramToken && config?.authorizedUserId)
+}
 
-  const globalConfig = loadGlobalConfig()
+export function loadConfig(projectDir: string): BotConfig {
+  const projectConfig = loadProjectConfig(projectDir)
 
   return {
-    telegramToken: process.env.TELEGRAM_BOT_TOKEN || globalConfig?.telegramToken || '',
-    authorizedUserId: process.env.AUTHORIZED_USER_ID || globalConfig?.authorizedUserId || '',
-    openCodeUrl: process.env.OPENCODE_SERVER_URL || 'http://localhost:4097',
-    openCodeUsername: process.env.OPENCODE_SERVER_USERNAME,
-    openCodePassword: process.env.OPENCODE_SERVER_PASSWORD,
-    stateFile,
-    logFile,
-    logLevel: (process.env.LOG_LEVEL as BotConfig['logLevel']) || 'info',
+    telegramToken: process.env.TELEGRAM_BOT_TOKEN || projectConfig?.telegramToken || '',
+    authorizedUserId: process.env.AUTHORIZED_USER_ID || projectConfig?.authorizedUserId || '',
+    openCodeUrl: process.env.OPENCODE_SERVER_URL || projectConfig?.openCodeUrl || 'http://localhost:4097',
+    openCodeUsername: process.env.OPENCODE_SERVER_USERNAME || projectConfig?.openCodeUsername,
+    openCodePassword: process.env.OPENCODE_SERVER_PASSWORD || projectConfig?.openCodePassword,
+    stateFile: getProjectStatePath(projectDir),
+    logFile: getProjectLogPath(projectDir),
+    logLevel: (process.env.LOG_LEVEL as BotConfig['logLevel']) || projectConfig?.logLevel || 'info',
   }
 }
 

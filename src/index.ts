@@ -5,7 +5,7 @@ import { existsSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { createInterface } from 'readline'
 import { TelegramBot } from './bot/index.js'
-import { loadConfig, validateConfig, hasCredentials, saveGlobalConfig, removeGlobalConfig } from './utils/config.js'
+import { loadConfig, validateConfig, hasCredentials, saveProjectConfig, removeProjectConfig, projectConfigExists } from './utils/config.js'
 import { initLogger, getLogger } from './utils/logger.js'
 import { OpenCodeServer } from './opencode/server.js'
 
@@ -58,7 +58,7 @@ Options:
   -p, --port <port>       OpenCode server port (default: 4097)
   --no-server             Don't start OpenCode server (connect to existing)
   --check                 Verify OpenCode installation
-  --uninstall             Remove saved credentials
+  --uninstall             Remove project configuration
   -h, --help              Show this help
 
 Examples:
@@ -67,7 +67,7 @@ Examples:
   opencode-tele -p 5000              # Use different port
   opencode-tele --no-server          # Connect to existing server
   opencode-tele --check              # Verify OpenCode is installed
-  opencode-tele --uninstall          # Remove saved credentials
+  opencode-tele --uninstall          # Remove this project's config
 `)
   process.exit(0)
 }
@@ -95,8 +95,8 @@ async function promptInput(question: string): Promise<string> {
   })
 }
 
-async function runSetup(): Promise<boolean> {
-  console.log('\n🤖 First time setup — configuring your Telegram bot credentials.\n')
+async function runSetup(projectDir: string): Promise<boolean> {
+  console.log('\n🤖 First time in this project — setup your Telegram bot.\n')
   console.log('To create a Telegram bot:')
   console.log('  1. Open Telegram and message @BotFather')
   console.log('  2. Send /newbot and follow the instructions')
@@ -120,16 +120,25 @@ async function runSetup(): Promise<boolean> {
     return false
   }
 
-  saveGlobalConfig({
+  saveProjectConfig(projectDir, {
     telegramToken,
     authorizedUserId,
   })
 
-  console.log('\n✅ Configuration saved! Starting bot...\n')
+  console.log('\n✅ Configuration saved to .opencode-tele/config.json')
+  console.log('   Starting bot...\n')
   return true
 }
 
 async function main() {
+  const projectDir = resolve(values.directory as string)
+
+  // Validate project directory
+  if (!existsSync(projectDir)) {
+    console.error(`Error: Directory does not exist: ${projectDir}`)
+    process.exit(1)
+  }
+
   // Handle --check
   if (values.check) {
     if (!checkOpenCode()) {
@@ -139,15 +148,21 @@ async function main() {
       process.exit(1)
     }
     console.log('✅ OpenCode is installed and ready.')
+    if (projectConfigExists(projectDir)) {
+      console.log('✅ Project configuration found.')
+    } else {
+      console.log('ℹ️  No project configuration yet (will prompt on first run).')
+    }
     process.exit(0)
   }
 
   // Handle --uninstall
   if (values.uninstall) {
-    if (removeGlobalConfig()) {
-      console.log('✅ Configuration removed.')
+    if (projectConfigExists(projectDir)) {
+      removeProjectConfig(projectDir)
+      console.log('✅ Project configuration removed.')
     } else {
-      console.log('No configuration found.')
+      console.log('No project configuration found.')
     }
     process.exit(0)
   }
@@ -160,17 +175,9 @@ async function main() {
     process.exit(1)
   }
 
-  const projectDir = resolve(values.directory as string)
-
-  // Validate project directory
-  if (!existsSync(projectDir)) {
-    console.error(`Error: Directory does not exist: ${projectDir}`)
-    process.exit(1)
-  }
-
-  // Auto-detect: if no credentials found, run setup inline
-  if (!hasCredentials()) {
-    const success = await runSetup()
+  // Auto-detect: if no credentials found for this project, run setup inline
+  if (!hasCredentials(projectDir)) {
+    const success = await runSetup(projectDir)
     if (!success) {
       process.exit(1)
     }

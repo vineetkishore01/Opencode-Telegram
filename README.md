@@ -31,17 +31,17 @@ Download `opencode-tele-win-x64.exe` and add to PATH.
 npm install -g opencode-tele
 ```
 
-## First Run
+## Usage
 
 ```bash
 cd /your/project
 opencode-tele
 ```
 
-On first run, you'll be prompted for your Telegram bot token and user ID:
+**First run in each project** — you'll be prompted for your Telegram bot token and user ID:
 
 ```
-🤖 First time setup — configuring your Telegram bot credentials.
+🤖 First time in this project — setup your Telegram bot.
 
   To create a Telegram bot:
     1. Open Telegram and message @BotFather
@@ -55,10 +55,25 @@ To get your user ID:
 
 Enter your Telegram user ID: 123456789
 
-✅ Configuration saved! Starting bot...
+✅ Configuration saved to .opencode-tele/config.json
+   Starting bot...
 ```
 
-Credentials are saved to `~/.opencode-tele/config.json` and never asked again.
+**Subsequent runs** — picks up saved config automatically.
+
+## Per-Project Configuration
+
+Each project has its own `.opencode-tele/` folder containing:
+
+```
+your-project/
+└── .opencode-tele/
+    ├── config.json    # Bot token, user ID, server URL
+    ├── state.json     # Sessions, model selections, costs
+    └── bot.log        # Runtime logs
+```
+
+This means different projects can use different Telegram bots, different chats, different models. Everything is isolated per project.
 
 ## Prerequisites
 
@@ -95,8 +110,8 @@ Just send any message to prompt OpenCode. Multiple messages are queued automatic
   -d, --directory <path>  Project directory (default: current)
   -p, --port <port>       OpenCode server port (default: 4097)
   --no-server             Connect to existing OpenCode server
-  --check                 Verify OpenCode installation
-  --uninstall             Remove saved credentials
+  --check                 Verify OpenCode installation and project config
+  --uninstall             Remove this project's configuration
   -h, --help              Show help
 ```
 
@@ -128,19 +143,11 @@ Events shown in Telegram:
 - **Todo lists** — `📋` with status icons
 - **Compaction** — `📦 Context compacted` when context is summarized
 
-## Project Files
-
-The bot stores state directly in your project folder:
-- `.opencode-tele-state.json` — session mappings, model selections, cost tracking
-- `.opencode-tele.log` — logs
-
-Both are git-ignored by default.
-
 ## Reconfigure
 
 ```bash
-opencode-tele --uninstall   # Remove saved credentials
-opencode-tele               # Re-run setup
+opencode-tele --uninstall   # Remove this project's config
+opencode-tele               # Re-run setup for this project
 ```
 
 ## Development
@@ -151,7 +158,6 @@ cd Opencode-Telegram/opencode-telegram-bot
 npm install
 npm run dev          # Watch mode
 npm run build        # Compile to dist/
-npm run build:binaries  # Build platform binaries
 ```
 
 ## License
