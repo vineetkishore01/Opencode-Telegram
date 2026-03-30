@@ -189,6 +189,7 @@ export class StateManager {
     existing.totalCacheWrite += cacheWrite
     existing.messages += 1
     this.state.costTracking.set(sessionId, existing)
+    this.save().catch(() => {})
   }
 
   getCost(sessionId: string): CostEntry | undefined {

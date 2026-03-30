@@ -20,6 +20,9 @@ export class Logger {
     mkdirSync(logDir, { recursive: true })
     
     this.logFile = createWriteStream(config.logFile, { flags: 'a' })
+    this.logFile.on('error', (err) => {
+      console.error(`Failed to write to log file: ${err.message}`)
+    })
     this.logLevel = config.logLevel
   }
 

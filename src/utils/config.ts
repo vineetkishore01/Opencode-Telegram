@@ -78,9 +78,21 @@ export function hasCredentials(projectDir: string): boolean {
 export function loadConfig(projectDir: string): BotConfig {
   const projectConfig = loadProjectConfig(projectDir)
 
+  const telegramToken = process.env.TELEGRAM_BOT_TOKEN || projectConfig?.telegramToken || ''
+  const authorizedUserId = process.env.AUTHORIZED_USER_ID || projectConfig?.authorizedUserId || ''
+
+  // Ensure env vars are set if they were loaded from config file
+  // This is important because handlers/commands use these env vars
+  if (!process.env.TELEGRAM_BOT_TOKEN && telegramToken) {
+    process.env.TELEGRAM_BOT_TOKEN = telegramToken
+  }
+  if (!process.env.AUTHORIZED_USER_ID && authorizedUserId) {
+    process.env.AUTHORIZED_USER_ID = authorizedUserId
+  }
+
   return {
-    telegramToken: process.env.TELEGRAM_BOT_TOKEN || projectConfig?.telegramToken || '',
-    authorizedUserId: process.env.AUTHORIZED_USER_ID || projectConfig?.authorizedUserId || '',
+    telegramToken,
+    authorizedUserId,
     openCodeUrl: process.env.OPENCODE_SERVER_URL || projectConfig?.openCodeUrl || 'http://localhost:4097',
     openCodeUsername: process.env.OPENCODE_SERVER_USERNAME || projectConfig?.openCodeUsername,
     openCodePassword: process.env.OPENCODE_SERVER_PASSWORD || projectConfig?.openCodePassword,

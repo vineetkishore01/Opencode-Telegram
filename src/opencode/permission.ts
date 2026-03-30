@@ -56,17 +56,18 @@ export class PermissionHandler {
     try {
       await this.client.replyPermission(requestId, reply as any)
 
-      const pending = this.pendingRequests.get(requestId)
-      if (pending) {
-        const statusText = reply === 'reject' ? 'Rejected' : 'Approved'
+      const statusText = reply === 'reject' ? 'Rejected' : 'Approved'
+      const message = callbackQuery.message
+
+      if (message) {
         await this.bot.api.editMessageText(
-          pending.chatId,
-          pending.messageId,
+          message.chat.id,
+          message.message_id,
           `Permission ${statusText}`
-        )
-        this.pendingRequests.delete(requestId)
+        ).catch(() => {})
       }
 
+      this.pendingRequests.delete(requestId)
       await this.bot.api.answerCallbackQuery(callbackQuery.id)
       log.info('Permission replied', { requestId, reply })
     } catch (error) {

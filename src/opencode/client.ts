@@ -75,9 +75,17 @@ export class OpenCodeClient {
           throw new Error(`OpenCode API error: ${response.status} ${response.statusText}`)
         }
 
+        if (!responseText || responseText.trim() === '') {
+          return {} as T
+        }
+
         try {
           return JSON.parse(responseText) as T
-        } catch {
+        } catch (e) {
+          // If we expected JSON but got something else, and it's not a success code,
+          // we should have already thrown above. If it IS a success code but not JSON,
+          // return as is (could be a plain string response).
+          log.debug('Response is not JSON', { endpoint, length: responseText.length })
           return responseText as any
         }
       } catch (error) {

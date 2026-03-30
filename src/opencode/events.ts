@@ -34,7 +34,15 @@ export class EventProcessor {
           if (!this.running) break
           this.consecutiveErrors = 0
           this.reconnectDelay = 1000
-          await this.handleEvent(event)
+          
+          try {
+            await this.handleEvent(event)
+          } catch (handlerError) {
+            log.error('Error handling event', { 
+              type: event.type, 
+              error: (handlerError as Error).message 
+            })
+          }
         }
       } catch (error) {
         this.consecutiveErrors++
