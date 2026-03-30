@@ -23,6 +23,7 @@ export class EventProcessor {
   ) {}
 
   private processedPartIds = new Set<string>()
+  private isPolling = false
 
   async start(): Promise<void> {
     if (this.running) return
@@ -37,6 +38,12 @@ export class EventProcessor {
     console.log('✅ Initialization wait complete.')
 
     while (this.running) {
+      if (this.isPolling) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+        continue
+      }
+
+      this.isPolling = true
       try {
         // 1. Check for pending permissions
         await this.permissionHandler.checkPendingPermissions().catch(() => {})
@@ -54,6 +61,7 @@ export class EventProcessor {
             
             // Check status: if we were busy and now it's idle, trigger idle handler
             if (this.messageQueue.isBusy(chatId) && (session as any).status?.type === 'idle') {
+              log.info('Task finished, session became idle', { sessionId, chatId })
               await this.handleSessionIdle({ sessionID: sessionId })
             }
 
@@ -92,6 +100,8 @@ export class EventProcessor {
       } catch (error) {
         log.error('Polling error', { error: (error as Error).message })
         await new Promise(resolve => setTimeout(resolve, 5000))
+      } finally {
+        this.isPolling = false
       }
     }
   }

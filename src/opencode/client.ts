@@ -65,6 +65,8 @@ export class OpenCodeClient {
     const headers = { ...this.buildHeaders(), ...(options.headers || {}) }
     const log = getLogger()
 
+    log.debug('Outgoing API request', { method, endpoint, body: options.body })
+
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         return await new Promise((resolve, reject) => {

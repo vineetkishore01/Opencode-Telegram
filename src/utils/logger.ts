@@ -57,22 +57,7 @@ export class Logger {
   }
 
   info(message: string, data?: any): void {
-    // Only log important info messages
-    if (message.includes('Starting') || 
-        message.includes('started') || 
-        message.includes('stopped') ||
-        message.includes('Shutting') ||
-        message.includes('Session') ||
-        message.includes('Model') ||
-        message.includes('Mode') ||
-        message.includes('sent to OpenCode') ||
-        message.includes('User message')) {
-      this.log('info', message, data)
-    } else {
-      // Write to file but don't show in logic
-      const timestamp = new Date().toISOString()
-      this.logFile.write(`[${timestamp}] [INFO] ${message}\n`)
-    }
+    this.log('info', message, data)
   }
 
   warn(message: string, data?: any): void {

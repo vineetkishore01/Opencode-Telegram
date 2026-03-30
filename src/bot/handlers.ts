@@ -19,21 +19,22 @@ export function registerHandlers(
   // Handle text messages
   bot.on('message:text', async (ctx) => {
     const userId = ctx.from?.id.toString()
+    const text = ctx.message.text
+    log.info('Incoming message', { userId, chatId: ctx.chat.id, text })
+
     if (userId !== process.env.AUTHORIZED_USER_ID) {
       await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    // Skip if it's a command
+    if (text.startsWith('/')) {
       return
     }
 
     const sessionId = stateManager.getCurrentSession(ctx.chat.id)
     if (!sessionId) {
       await ctx.reply('No session selected. Use /session to create or select one.')
-      return
-    }
-
-    const text = ctx.message.text
-
-    // Skip if it's a command
-    if (text.startsWith('/')) {
       return
     }
 
@@ -89,6 +90,7 @@ export function registerHandlers(
   bot.on('callback_query:data', async (ctx) => {
     const userId = ctx.from?.id.toString()
     const data = ctx.callbackQuery.data
+    log.info('Incoming callback', { userId, chatId: ctx.chat?.id, data })
 
     if (userId !== process.env.AUTHORIZED_USER_ID) {
       await ctx.answerCallbackQuery('Not authorized')

@@ -12,10 +12,12 @@ export class MessageQueue {
   private busyChats = new Set<number>()
 
   setBusy(chatId: number): void {
+    getLogger().info('Chat marked BUSY', { chatId })
     this.busyChats.add(chatId)
   }
 
   setIdle(chatId: number): void {
+    getLogger().info('Chat marked IDLE', { chatId })
     this.busyChats.delete(chatId)
   }
 

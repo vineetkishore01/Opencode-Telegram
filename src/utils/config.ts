@@ -98,7 +98,7 @@ export function loadConfig(projectDir: string): BotConfig {
     openCodePassword: process.env.OPENCODE_SERVER_PASSWORD || projectConfig?.openCodePassword,
     stateFile: resolve(getProjectStatePath(projectDir)),
     logFile: resolve(getProjectLogPath(projectDir)),
-    logLevel: (process.env.LOG_LEVEL as BotConfig['logLevel']) || projectConfig?.logLevel || 'info',
+    logLevel: (process.env.LOG_LEVEL as BotConfig['logLevel']) || projectConfig?.logLevel || 'debug',
   }
 }
 
