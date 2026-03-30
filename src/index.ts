@@ -197,22 +197,21 @@ async function main() {
 
   // Start OpenCode server if needed
   if (startServer) {
-    logger.info('Starting OpenCode server...')
-      openCodeServer = new OpenCodeServer(projectDir, portNum)
+    console.log('⏳ Starting OpenCode server...')
+    openCodeServer = new OpenCodeServer(projectDir, portNum)
 
-      try {
-        await openCodeServer.start()
-        logger.info('OpenCode server started')
-
-        // Update config with actual port
-        botConfig.openCodeUrl = `http://localhost:${portNum}`
+    try {
+      await openCodeServer.start()
+      console.log('✅ OpenCode server started')
+      botConfig.openCodeUrl = `http://localhost:${portNum}`
     } catch (error) {
-      logger.error('Failed to start OpenCode server', { error: (error as Error).message })
+      console.error(`❌ Failed to start OpenCode server: ${(error as Error).message}`)
       process.exit(1)
     }
   }
 
   // Create and start bot
+  console.log('🚀 Starting Telegram bot...')
   const bot = new TelegramBot(botConfig)
 
   // Handle graceful shutdown

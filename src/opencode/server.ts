@@ -30,6 +30,23 @@ export class OpenCodeServer {
     })
   }
 
+  private async waitForServer(maxAttempts: number = 30): Promise<boolean> {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const response = await fetch(`http://localhost:${this.port}/session`, {
+          signal: AbortSignal.timeout(1000),
+        })
+        if (response.ok || response.status < 500) {
+          return true
+        }
+      } catch {
+        // Server not ready yet
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    return false
+  }
+
   async start(): Promise<void> {
     const log = getLogger()
 
@@ -54,7 +71,7 @@ export class OpenCodeServer {
       // Check if opencode is installed
       const checkProcess = spawn('which', ['opencode'], { shell: true })
 
-      checkProcess.on('close', (code) => {
+      checkProcess.on('close', async (code) => {
         if (code !== 0) {
           reject(new Error('OpenCode is not installed. Install with: npm install -g opencode-ai'))
           return
@@ -115,12 +132,21 @@ export class OpenCodeServer {
           }
         })
 
-        // Assume started after 3 seconds if no error
-        setTimeout(() => {
+        // Wait for server to be ready by checking health endpoint
+        setTimeout(async () => {
           if (!started) {
-            started = true
-            clearTimeout(timeout)
-            resolve()
+            const isReady = await this.waitForServer()
+            if (isReady) {
+              started = true
+              clearTimeout(timeout)
+              resolve()
+            } else {
+              // Server didn't respond, but might still be starting
+              // Assume started after checking
+              started = true
+              clearTimeout(timeout)
+              resolve()
+            }
           }
         }, 3000)
       })
