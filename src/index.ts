@@ -215,8 +215,9 @@ async function main() {
 
     try {
       await openCodeServer.start()
-      console.log('✅ OpenCode server started')
-      botConfig.openCodeUrl = `http://127.0.0.1:${portNum}`
+      const actualPort = openCodeServer.getPort()
+      console.log(`✅ OpenCode server started on port ${actualPort}`)
+      botConfig.openCodeUrl = `http://127.0.0.1:${actualPort}`
     } catch (error) {
       console.error(`❌ Failed to start OpenCode server: ${(error as Error).message}`)
       process.exit(1)
@@ -227,8 +228,11 @@ async function main() {
   console.log('🚀 Starting Telegram bot...')
   const bot = new TelegramBot(botConfig)
 
-  // Handle graceful shutdown
+  // Handle graceful shutdown — guard against re-entrant calls
+  let shuttingDown = false
   const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
     logger.info('Shutting down...')
 
     if (openCodeServer) {

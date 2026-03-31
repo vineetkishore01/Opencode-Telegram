@@ -55,6 +55,15 @@ export function escapeMarkdown(text: string): string {
   return text.replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1')
 }
 
+export function escapeMarkdownInCode(text: string): string {
+  return text.replace(/([`\\])/g, '\\$1')
+}
+
+export function escapeMarkdownSafe(text: string): string {
+  const escaped = escapeMarkdown(text)
+  return escaped.length > 4096 ? escaped.substring(0, 4090) + '...' : escaped
+}
+
 // Add sentence breaks for readability
 export function breakSentences(text: string): string {
   // Preserve code blocks

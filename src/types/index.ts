@@ -19,7 +19,7 @@ export const MessagePart = z.object({
   id: z.string(),
   sessionID: z.string(),
   messageID: z.string(),
-  type: z.enum(['text', 'reasoning', 'tool', 'file', 'step-start', 'step-finish', 'patch', 'snapshot', 'retry', 'subtask']),
+  type: z.enum(['text', 'reasoning', 'tool', 'file', 'step-start', 'step-finish', 'patch', 'snapshot', 'retry', 'subtask', 'agent', 'compaction']),
   text: z.string().optional(),
   tool: z.string().optional(),
   state: z.any().optional(),

@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, rename } from 'fs/promises'
 import { dirname } from 'path'
 import { z } from 'zod'
 import { getLogger } from '../utils/logger.js'
@@ -29,6 +29,10 @@ const SavedStateSchema = z.object({
     messages: z.number(),
   })).optional(),
   promptCounters: z.record(z.string(), z.number()).optional(),
+  queuedMessages: z.array(z.object({
+    chatId: z.number(),
+    text: z.string(),
+  })).optional(),
 }).passthrough()
 
 export interface CostEntry {
@@ -41,6 +45,11 @@ export interface CostEntry {
   messages: number
 }
 
+export interface QueuedMessage {
+  chatId: number
+  text: string
+}
+
 export class StateManager {
   private state: {
     sessions: Map<number, string>
@@ -49,8 +58,10 @@ export class StateManager {
     lastUpdateId?: number
     costTracking: Map<string, CostEntry>
     promptCounters: Map<number, number>
+    queuedMessages: QueuedMessage[]
   }
   private stateFile: string
+  private saveQueue: Promise<void> = Promise.resolve()
 
   constructor(stateFile: string = 'bot-state.json') {
     this.stateFile = stateFile
@@ -60,6 +71,7 @@ export class StateManager {
       modes: new Map(),
       costTracking: new Map(),
       promptCounters: new Map(),
+      queuedMessages: [],
     }
   }
 
@@ -76,37 +88,56 @@ export class StateManager {
           Object.entries(parsed.costTracking || {}).map(([k, v]) => [k, v])
         ),
         promptCounters: new Map(
-          Object.entries(parsed.promptCounters || {}).map(([k, v]) => [parseInt(k), v])
+          Object.entries(parsed.promptCounters || {})
+            .map(([k, v]) => [parseInt(k), v] as [number, number])
+            .filter(([k]) => !isNaN(k))
         ),
+        queuedMessages: parsed.queuedMessages || [],
       }
       getLogger().info('State loaded', {
         sessions: this.state.sessions.size,
         models: this.state.models.size,
-        modes: this.state.modes.size
+        modes: this.state.modes.size,
+        queuedMessages: this.state.queuedMessages.length
       })
-    } catch {
-      getLogger().info('No existing state found, starting fresh')
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException
+      if (err.code === 'ENOENT') {
+        getLogger().info('No existing state found, starting fresh')
+      } else {
+        getLogger().warn('State file corrupted, starting fresh', { error: err.message })
+      }
     }
   }
 
   async save(): Promise<void> {
-    const dir = dirname(this.stateFile)
-    await mkdir(dir, { recursive: true })
+    this.saveQueue = this.saveQueue.then(async () => {
+      try {
+        const dir = dirname(this.stateFile)
+        await mkdir(dir, { recursive: true })
 
-    const data = {
-      sessions: Array.from(this.state.sessions.entries()),
-      models: Array.from(this.state.models.entries()),
-      modes: Array.from(this.state.modes.entries()),
-      lastUpdateId: this.state.lastUpdateId,
-      costTracking: Object.fromEntries(this.state.costTracking),
-      promptCounters: Object.fromEntries(this.state.promptCounters),
-    }
-    await writeFile(this.stateFile, JSON.stringify(data, null, 2))
+        const data = {
+          sessions: Array.from(this.state.sessions.entries()),
+          models: Array.from(this.state.models.entries()),
+          modes: Array.from(this.state.modes.entries()),
+          lastUpdateId: this.state.lastUpdateId,
+          costTracking: Object.fromEntries(this.state.costTracking),
+          promptCounters: Object.fromEntries(this.state.promptCounters),
+          queuedMessages: this.state.queuedMessages,
+        }
+        const tmpFile = this.stateFile + '.tmp'
+        await writeFile(tmpFile, JSON.stringify(data, null, 2))
+        await rename(tmpFile, this.stateFile)
+      } catch (error) {
+        getLogger().error('Failed to save state', { error: (error as Error).message })
+      }
+    }).catch(() => {})
+    return this.saveQueue
   }
 
   setCurrentSession(chatId: number, sessionId: string): void {
     this.state.sessions.set(chatId, sessionId)
-    this.save().catch(() => {})
+    this.save()
   }
 
   getCurrentSession(chatId: number): string | undefined {
@@ -115,7 +146,7 @@ export class StateManager {
 
   clearCurrentSession(chatId: number): void {
     this.state.sessions.delete(chatId)
-    this.save().catch(() => {})
+    this.save()
   }
 
   getChatIdForSession(sessionId: string): number | undefined {
@@ -127,7 +158,7 @@ export class StateManager {
 
   setCurrentModel(chatId: number, providerId: string, modelId: string): void {
     this.state.models.set(chatId, { providerId, modelId })
-    this.save().catch(() => {})
+    this.save()
   }
 
   getCurrentModel(chatId: number): SelectedModel | undefined {
@@ -136,12 +167,12 @@ export class StateManager {
 
   clearCurrentModel(chatId: number): void {
     this.state.models.delete(chatId)
-    this.save().catch(() => {})
+    this.save()
   }
 
   setCurrentMode(chatId: number, mode: string): void {
     this.state.modes.set(chatId, mode)
-    this.save().catch(() => {})
+    this.save()
   }
 
   getCurrentMode(chatId: number): string | undefined {
@@ -150,7 +181,7 @@ export class StateManager {
 
   clearCurrentMode(chatId: number): void {
     this.state.modes.delete(chatId)
-    this.save().catch(() => {})
+    this.save()
   }
 
   getChatState(chatId: number): ChatState {
@@ -162,10 +193,14 @@ export class StateManager {
   }
 
   clearChatState(chatId: number): void {
+    const sessionId = this.state.sessions.get(chatId)
     this.state.sessions.delete(chatId)
     this.state.models.delete(chatId)
     this.state.modes.delete(chatId)
-    this.save().catch(() => {})
+    if (sessionId) this.state.costTracking.delete(sessionId)
+    this.state.promptCounters.delete(chatId)
+    this.state.queuedMessages = this.state.queuedMessages.filter(m => m.chatId !== chatId)
+    this.save()
   }
 
   setLastUpdateId(updateId: number): void {
@@ -189,7 +224,7 @@ export class StateManager {
     existing.totalCacheWrite += cacheWrite
     existing.messages += 1
     this.state.costTracking.set(sessionId, existing)
-    this.save().catch(() => {})
+    this.save()
   }
 
   getCost(sessionId: string): CostEntry | undefined {
@@ -200,7 +235,7 @@ export class StateManager {
     const current = this.state.promptCounters.get(chatId) || 0
     const next = current + 1
     this.state.promptCounters.set(chatId, next)
-    this.save().catch(() => {})
+    this.save()
     return next
   }
 
@@ -210,5 +245,30 @@ export class StateManager {
 
   getAllChatIds(): number[] {
     return Array.from(this.state.sessions.keys())
+  }
+
+  getQueuedMessages(): QueuedMessage[] {
+    return [...this.state.queuedMessages]
+  }
+
+  addQueuedMessage(chatId: number, text: string): void {
+    this.state.queuedMessages.push({ chatId, text })
+    this.save()
+  }
+
+  removeQueuedMessage(chatId: number, text: string): void {
+    this.state.queuedMessages = this.state.queuedMessages.filter(
+      m => !(m.chatId === chatId && m.text === text)
+    )
+    this.save()
+  }
+
+  clearQueuedMessages(chatId?: number): void {
+    if (chatId !== undefined) {
+      this.state.queuedMessages = this.state.queuedMessages.filter(m => m.chatId !== chatId)
+    } else {
+      this.state.queuedMessages = []
+    }
+    this.save()
   }
 }

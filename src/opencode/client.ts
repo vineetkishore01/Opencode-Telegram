@@ -1,4 +1,5 @@
 import * as http from 'http'
+import * as https from 'https'
 import { SessionInfo, MessageInfo, PermissionRequest, PermissionReply } from '../types/index.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -27,11 +28,19 @@ async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-// Create a persistent agent for all requests
+// Create persistent agents for all requests
 const httpAgent = new http.Agent({
   keepAlive: true,
   maxSockets: 10,
   timeout: 60000,
+  keepAliveMsecs: 30000,
+})
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 10,
+  timeout: 60000,
+  keepAliveMsecs: 30000,
 })
 
 export class OpenCodeClient {
@@ -39,14 +48,16 @@ export class OpenCodeClient {
   private auth?: { username: string; password: string }
   private hostname: string
   private port: number
+  private isHttps: boolean
 
   constructor(baseUrl: string, auth?: { username: string; password: string }) {
     this.baseUrl = baseUrl.replace(/\/$/, '')
     this.auth = auth
-    
+
     const url = new URL(this.baseUrl)
     this.hostname = url.hostname
-    this.port = parseInt(url.port) || 80
+    this.port = parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80)
+    this.isHttps = url.protocol === 'https:'
   }
 
   private buildHeaders(): Record<string, string> {
@@ -65,11 +76,15 @@ export class OpenCodeClient {
     const headers = { ...this.buildHeaders(), ...(options.headers || {}) }
     const log = getLogger()
 
-    log.debug('Outgoing API request', { method, endpoint, body: options.body })
+    log.debug('Outgoing API request', { method, endpoint })
+
+    let lastError: Error | undefined
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         return await new Promise((resolve, reject) => {
+          const transport = this.isHttps ? https : http
+          const agent = this.isHttps ? httpsAgent : httpAgent
           const reqOptions = {
             hostname: this.hostname,
             port: this.port,
@@ -77,14 +92,15 @@ export class OpenCodeClient {
             method: method,
             headers: headers,
             timeout: REQUEST_TIMEOUT,
-            agent: httpAgent, // Use the persistent agent
+            agent,
           }
 
-          const req = http.request(reqOptions, (res) => {
-            let data = ''
-            res.on('data', (chunk) => { data += chunk })
+          const req = transport.request(reqOptions, (res) => {
+            const chunks: Buffer[] = []
+            res.on('data', (chunk) => { chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)) })
             res.on('end', () => {
               if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                const data = Buffer.concat(chunks).toString()
                 if (!data || data.trim() === '') {
                   resolve({} as T)
                   return
@@ -95,39 +111,46 @@ export class OpenCodeClient {
                   resolve(data as any)
                 }
               } else {
-                reject(new Error(`OpenCode API error: ${res.statusCode} ${res.statusMessage}`))
+                const data = Buffer.concat(chunks).toString()
+                const errorMsg = data
+                  ? `OpenCode API error: ${res.statusCode} ${res.statusMessage} - ${data}`
+                  : `OpenCode API error: ${res.statusCode} ${res.statusMessage}`
+                reject(new Error(errorMsg))
               }
             })
           })
 
           req.on('error', (err) => reject(err))
           req.on('timeout', () => {
-            req.destroy()
-            reject(new Error('Request timeout'))
+            req.destroy(new Error('Request timeout'))
           })
 
           if (options.body) {
-            req.write(options.body)
+            const body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body)
+            req.write(body)
           }
           req.end()
         })
       } catch (error) {
+        lastError = error as Error
         const isRetryable = attempt < retries && (
-          (error as any).code === 'ECONNRESET' || 
-          (error as any).code === 'ECONNREFUSED' || 
+          (error as any).code === 'ECONNRESET' ||
+          (error as any).code === 'ECONNREFUSED' ||
           (error as Error).message === 'terminated' ||
-          (error as Error).message === 'Request timeout'
+          (error as Error).message === 'Request timeout' ||
+          ((error as Error).message.includes('OpenCode API error') &&
+           /50[0-4]/.test((error as Error).message))
         )
 
         if (!isRetryable) throw error
 
-        const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
+        const delay = RETRY_BASE_DELAY * Math.pow(2, attempt) + Math.random() * 500
         log.warn(`API request failed, retrying in ${delay}ms`, { method, endpoint, attempt: attempt + 1, error: (error as Error).message })
         await sleep(delay)
       }
     }
 
-    throw new Error('Request failed after retries')
+    throw new Error(`Request failed after retries: ${lastError?.message || 'unknown error'}`)
   }
 
   async createSession(directory?: string): Promise<SessionInfo> {
@@ -138,7 +161,7 @@ export class OpenCodeClient {
   }
 
   async getSession(sessionId: string): Promise<SessionInfo> {
-    return this.request<SessionInfo>(`/session/${sessionId}`)
+    return this.request<SessionInfo>(`/session/${encodeURIComponent(sessionId)}`)
   }
 
   async listSessions(options?: { directory?: string; limit?: number; search?: string }): Promise<SessionInfo[]> {
@@ -151,7 +174,7 @@ export class OpenCodeClient {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    await this.request<void>(`/session/${sessionId}`, { method: 'DELETE' })
+    await this.request<void>(`/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
   }
 
   async sendMessage(sessionId: string, content: string, options?: {
@@ -169,7 +192,7 @@ export class OpenCodeClient {
     if (options?.agent) {
       body.agent = options.agent
     }
-    return this.request<MessageInfo>(`/session/${sessionId}/message`, {
+    return this.request<MessageInfo>(`/session/${encodeURIComponent(sessionId)}/message`, {
       method: 'POST',
       body: JSON.stringify(body),
     })
@@ -190,7 +213,7 @@ export class OpenCodeClient {
     if (options?.agent) {
       body.agent = options.agent
     }
-    await this.request<void>(`/session/${sessionId}/prompt_async`, {
+    await this.request<void>(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       method: 'POST',
       body: JSON.stringify(body),
     })
@@ -198,7 +221,7 @@ export class OpenCodeClient {
 
   async getMessages(sessionId: string, limit?: number): Promise<MessageInfo[]> {
     const params = limit ? `?limit=${limit}` : ''
-    return this.request<MessageInfo[]>(`/session/${sessionId}/message${params}`)
+    return this.request<MessageInfo[]>(`/session/${encodeURIComponent(sessionId)}/message${params}`)
   }
 
   async listProviders(): Promise<Provider[]> {
@@ -267,18 +290,18 @@ export class OpenCodeClient {
   }
 
   async listPermissions(): Promise<PermissionRequest[]> {
-    return this.request<PermissionRequest[]>('/permission/')
+    return this.request<PermissionRequest[]>('/permission')
   }
 
   async replyPermission(requestId: string, reply: PermissionReply, message?: string): Promise<void> {
-    await this.request<void>(`/permission/${requestId}/reply`, {
+    await this.request<void>(`/permission/${encodeURIComponent(requestId)}/reply`, {
       method: 'POST',
       body: JSON.stringify({ reply, message }),
     })
   }
 
   async abortSession(sessionId: string): Promise<void> {
-    await this.request<void>(`/session/${sessionId}/abort`, { method: 'POST' })
+    await this.request<void>(`/session/${encodeURIComponent(sessionId)}/abort`, { method: 'POST' })
   }
 
   async listFiles(dirPath?: string): Promise<{ entries: Array<{ name: string; path: string; isDir: boolean; size?: number }> }> {
@@ -295,19 +318,19 @@ export class OpenCodeClient {
   }
 
   async replyQuestion(questionId: string, answers: string[]): Promise<void> {
-    await this.request<void>(`/question/${questionId}/reply`, {
+    await this.request<void>(`/question/${encodeURIComponent(questionId)}/reply`, {
       method: 'POST',
       body: JSON.stringify({ answers }),
     })
   }
 
   async rejectQuestion(questionId: string): Promise<void> {
-    await this.request<void>(`/question/${questionId}/reject`, { method: 'POST' })
+    await this.request<void>(`/question/${encodeURIComponent(questionId)}/reject`, { method: 'POST' })
   }
 
   async getSessionTodo(sessionId: string): Promise<Array<{ content: string; status: string; priority: string }>> {
     try {
-      return await this.request(`/session/${sessionId}/todo`)
+      return await this.request(`/session/${encodeURIComponent(sessionId)}/todo`)
     } catch {
       return []
     }
@@ -315,7 +338,7 @@ export class OpenCodeClient {
 
   async getSessionDiff(sessionId: string): Promise<Array<{ file: string; additions: number; deletions: number; status: string }>> {
     try {
-      return await this.request(`/session/${sessionId}/diff`)
+      return await this.request(`/session/${encodeURIComponent(sessionId)}/diff`)
     } catch {
       return []
     }

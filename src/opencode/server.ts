@@ -1,23 +1,63 @@
 import { spawn, ChildProcess } from 'child_process'
 import { createServer } from 'net'
+import { existsSync, accessSync, constants } from 'fs'
 import { getLogger } from '../utils/logger.js'
+
+const DEFAULT_PORT = 4097
+const MAX_PORT_SEARCH = 10
 
 export class OpenCodeServer {
   private process: ChildProcess | null = null
   private projectDir: string
   private port: number
+  private starting = false
 
-  constructor(projectDir: string, port: number = 4097) {
+  constructor(projectDir: string, port: number = DEFAULT_PORT) {
     this.projectDir = projectDir
     this.port = port
   }
 
-  private async checkPortAvailable(): Promise<boolean> {
+  getPort(): number {
+    return this.port
+  }
+
+  private async findAvailablePort(startPort: number): Promise<number> {
+    // First, check if there's already an OpenCode server we can connect to
+    for (let port = startPort; port < startPort + MAX_PORT_SEARCH; port++) {
+      const existingServer = await this.checkOpenCodeServer(port)
+      if (existingServer) {
+        getLogger().info(`Found existing OpenCode server on port ${port}`)
+        return port
+      }
+    }
+
+    // No existing server found, try to find an available port to start new server
+    for (let port = startPort; port < startPort + MAX_PORT_SEARCH; port++) {
+      const available = await this.checkPort(port)
+      if (available) {
+        return port
+      }
+      getLogger().debug(`Port ${port} in use, trying next...`)
+    }
+    throw new Error(`No available ports found in range ${startPort}-${startPort + MAX_PORT_SEARCH - 1}`)
+  }
+
+  private async checkOpenCodeServer(port: number): Promise<boolean> {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/session`, {
+        signal: AbortSignal.timeout(2000),
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
+  private checkPort(port: number): Promise<boolean> {
     return new Promise((resolve) => {
       const server = createServer()
       server.once('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
-          getLogger().warn(`Port ${this.port} is already in use`)
           resolve(false)
         } else {
           resolve(true)
@@ -26,7 +66,7 @@ export class OpenCodeServer {
       server.once('listening', () => {
         server.close(() => resolve(true))
       })
-      server.listen(this.port)
+      server.listen(port)
     })
   }
 
@@ -36,7 +76,7 @@ export class OpenCodeServer {
         const response = await fetch(`http://127.0.0.1:${this.port}/session`, {
           signal: AbortSignal.timeout(1000),
         })
-        if (response.ok || response.status < 500) {
+        if (response.ok) {
           return true
         }
       } catch {
@@ -50,57 +90,58 @@ export class OpenCodeServer {
   async start(): Promise<void> {
     const log = getLogger()
 
-    // Validate port range
-    if (!Number.isInteger(this.port) || this.port < 1024 || this.port > 65535) {
-      throw new Error(`Invalid port ${this.port}. Must be between 1024 and 65535.`)
+    if (this.process && !this.process.killed) {
+      throw new Error('Server is already running')
     }
 
-    // Check if port is available (cross-platform)
-    const portAvailable = await this.checkPortAvailable()
-    if (!portAvailable) {
-      throw new Error(
-        `Port ${this.port} is already in use. ` +
-        `Either:\n` +
-        `  1. Kill the process using port ${this.port}\n` +
-        `  2. Use a different port: opencode-tele -p <port>\n` +
-        `  3. Connect to existing server: opencode-tele --no-server`
-      )
+    if (this.starting) {
+      throw new Error('Server is already starting')
     }
+    this.starting = true
 
-    return new Promise((resolve, reject) => {
-      // Check if opencode is installed
-      const checkProcess = spawn('which', ['opencode'], { shell: true })
+    try {
+      if (!Number.isInteger(this.port) || this.port < 1024 || this.port > 65535) {
+        throw new Error(`Invalid port ${this.port}. Must be between 1024 and 65535.`)
+      }
 
-      checkProcess.on('close', async (code) => {
-        if (code !== 0) {
-          reject(new Error('OpenCode is not installed. Install with: npm install -g opencode-ai'))
-          return
-        }
+      if (!existsSync(this.projectDir)) {
+        throw new Error(`Project directory does not exist: ${this.projectDir}`)
+      }
+      try {
+        accessSync(this.projectDir, constants.R_OK | constants.X_OK)
+      } catch {
+        throw new Error(`Project directory not accessible: ${this.projectDir}`)
+      }
 
-        // Start OpenCode server
-        log.info('Spawning OpenCode server process...')
+      // Try to find an available port, starting from requested port
+      const actualPort = await this.findAvailablePort(this.port)
+      if (actualPort !== this.port) {
+        log.info(`Port ${this.port} in use, using port ${actualPort} instead`)
+      }
+      this.port = actualPort
+
+      return new Promise((resolve, reject) => {
+        log.info('Spawning OpenCode server process...', { port: this.port })
 
         this.process = spawn('opencode', ['serve', '--port', this.port.toString()], {
           cwd: this.projectDir,
           stdio: ['ignore', 'pipe', 'pipe'],
-          detached: false, // Ensure it's in the same process group
+          detached: false,
         })
 
-        // Force cleanup on main process exit
         const onExit = () => {
-          if (this.process) {
+          if (this.process && !this.process.killed) {
             this.process.kill('SIGKILL')
           }
         }
-        process.on('exit', onExit)
-        process.on('SIGINT', onExit)
-        process.on('SIGTERM', onExit)
+        process.once('exit', onExit)
 
         let started = false
         let errorOutput = ''
         const timeout = setTimeout(() => {
           if (!started) {
             this.process?.kill()
+            this.starting = false
             reject(new Error('OpenCode server failed to start within 30 seconds'))
           }
         }, 30000)
@@ -109,10 +150,11 @@ export class OpenCodeServer {
           const output = data.toString()
           log.info('OpenCode stdout', { output: output.trim() })
 
-          if (output.includes('Server listening') || output.includes('started on port') || output.includes(this.port.toString())) {
+          if (output.includes('Server listening') || output.includes('started on port')) {
             if (!started) {
               started = true
               clearTimeout(timeout)
+              this.starting = false
               resolve()
             }
           }
@@ -121,11 +163,15 @@ export class OpenCodeServer {
         this.process.stderr?.on('data', (data) => {
           const output = data.toString()
           errorOutput += output
+          if (errorOutput.length > 10 * 1024) {
+            errorOutput = errorOutput.slice(-10 * 1024)
+          }
           log.warn('OpenCode stderr', { output: output.trim() })
         })
 
         this.process.on('error', (error) => {
           clearTimeout(timeout)
+          this.starting = false
           log.error('Failed to start OpenCode server', { error: error.message })
           reject(error)
         })
@@ -133,67 +179,64 @@ export class OpenCodeServer {
         this.process.on('close', (code) => {
           clearTimeout(timeout)
           if (!started) {
+            this.starting = false
             const errorMsg = errorOutput.includes('Failed to start server on port')
               ? `Port ${this.port} is already in use. Use a different port with: opencode-tele -p <port>`
               : `OpenCode server exited with code ${code}. Error: ${errorOutput}`
             reject(new Error(errorMsg))
           } else {
+            this.process = null
             const msg = `⚠️ OpenCode server process exited with code ${code}`
             log.warn(msg)
             console.warn(`\n${msg}`)
           }
         })
 
-        // Wait for server to be ready by checking health endpoint
         setTimeout(async () => {
           if (!started) {
             const isReady = await this.waitForServer()
             if (isReady) {
               started = true
               clearTimeout(timeout)
+              this.starting = false
               resolve()
             } else {
-              // Server didn't respond, but might still be starting
-              // Assume started after checking
-              started = true
-              clearTimeout(timeout)
-              resolve()
+              this.process?.kill()
+              this.starting = false
+              reject(new Error('OpenCode server failed health check'))
             }
           }
         }, 3000)
       })
-    })
+    } finally {
+      this.starting = false
+    }
   }
 
   async stop(): Promise<void> {
     const log = getLogger()
 
-    if (this.process) {
-      log.info('Stopping OpenCode server...')
-
-      return new Promise((resolve) => {
-        if (!this.process) {
-          resolve()
-          return
-        }
-
-        this.process.on('close', () => {
-          log.info('OpenCode server stopped')
-          resolve()
-        })
-
-        // Try graceful shutdown first
-        this.process.kill('SIGTERM')
-
-        // Force kill after 5 seconds
-        setTimeout(() => {
-          if (this.process && !this.process.killed) {
-            log.warn('Force killing OpenCode server...')
-            this.process.kill('SIGKILL')
-          }
-        }, 5000)
-      })
+    if (!this.process || this.process.killed) {
+      this.process = null
+      return
     }
+
+    return new Promise((resolve) => {
+      this.process!.once('close', () => {
+        this.process = null
+        log.info('OpenCode server stopped')
+        resolve()
+      })
+
+      this.process!.kill('SIGTERM')
+
+      setTimeout(() => {
+        if (this.process && !this.process.killed) {
+          log.warn('Force killing OpenCode server...')
+          this.process.kill('SIGKILL')
+        }
+      }, 5000)
+    })
   }
 
   isRunning(): boolean {

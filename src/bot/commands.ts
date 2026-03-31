@@ -10,7 +10,8 @@ export function registerCommands(
   bot: Bot,
   stateManager: StateManager,
   client: OpenCodeClient,
-  messageQueue: MessageQueue
+  messageQueue: MessageQueue,
+  authorizedUserId: string
 ) {
   const log = getLogger()
 
@@ -19,7 +20,7 @@ export function registerCommands(
   const providersCache = new Map<number, Provider[]>()
 
   // Helper to check authorization
-  const isAuthorized = (userId?: string) => userId === process.env.AUTHORIZED_USER_ID
+  const isAuthorized = (userId?: string) => userId === authorizedUserId
 
   // Start command
   bot.command('start', async (ctx) => {
@@ -171,6 +172,30 @@ export function registerCommands(
       await ctx.reply('🛑 Session aborted.')
     } catch (error) {
       await ctx.reply(`Failed to abort: ${(error as Error).message}`)
+    }
+  })
+
+  // Delete command
+  bot.command('delete', async (ctx) => {
+    if (!isAuthorized(ctx.from?.id.toString())) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    log.info('User command', { command: '/delete', userId: ctx.from?.id })
+
+    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
+    if (!sessionId) {
+      await ctx.reply('No session selected.')
+      return
+    }
+
+    try {
+      await client.deleteSession(sessionId)
+      stateManager.clearChatState(ctx.chat.id)
+      await ctx.reply(`🗑️ Session \`${escapeMarkdown(sessionId)}\` deleted.`, { parse_mode: 'Markdown' })
+    } catch (error) {
+      await ctx.reply(`Failed to delete: ${(error as Error).message}`)
     }
   })
 

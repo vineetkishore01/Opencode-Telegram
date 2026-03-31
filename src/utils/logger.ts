@@ -56,8 +56,10 @@ export class Logger {
       }
     }
 
-    // Log ALL levels to console (not just warn/error)
-    console.log(logMessage)
+    // Only log INFO and above to console (DEBUG goes to file only)
+    if (level !== 'debug') {
+      console.log(logMessage)
+    }
     
     this.pendingWrites++
     this.logFile.write(logMessage + '\n')
