@@ -527,13 +527,20 @@ export class EventProcessor {
         try {
           const msg = await this.bot.api.sendMessage(chatId, '⏳ Processing next message...')
           this.setWorkingMessage(sessionID, chatId, msg.message_id)
-          await this.client.sendAsyncMessage(sessionID, next.text, {
+
+          // Fire-and-forget to avoid blocking poll loop
+          this.client.sendAsyncMessage(sessionID, next.text, {
             providerId: model?.providerId, modelId: model?.modelId, agent: mode,
+          }).catch((error: Error) => {
+            getLogger().error('Failed to send queued message', { error: error.message })
+            this.messageQueue.setIdle(chatId)
+            this.workingSessions.delete(sessionID)
+            this.bot.api.sendMessage(chatId, `❌ Error: ${error.message.substring(0, 500)}`).catch(() => {})
           })
+
           this.recentlySentSessions.add(sessionID)
         } catch (error) {
-          getLogger().error('Failed to process queued message', { error: (error as Error).message })
-          await this.bot.api.sendMessage(chatId, `❌ Error: ${(error as Error).message.substring(0, 500)}`).catch(() => {})
+          getLogger().error('Failed to send notification for queued message', { error: (error as Error).message })
           this.messageQueue.setIdle(chatId)
           this.workingSessions.delete(sessionID)
         }
