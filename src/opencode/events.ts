@@ -58,7 +58,6 @@ export class EventProcessor {
         await this.permissionHandler.checkPendingPermissions().catch(() => {})
 
         // 2. Poll active sessions for new message parts and status
-        const chatIds = this.stateManager.getAllChatIds()
         for (const chatId of chatIds) {
           if (!this.running) break
           const sessionId = this.stateManager.getCurrentSession(chatId)
