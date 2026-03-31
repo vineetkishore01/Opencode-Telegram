@@ -4,10 +4,13 @@ import { OpenCodeClient, Model, Provider } from '../opencode/client.js'
 import { escapeMarkdown, splitMessage } from '../utils/formatter.js'
 import { getLogger } from '../utils/logger.js'
 
+import { MessageQueue } from './queue.js'
+
 export function registerCommands(
   bot: Bot,
   stateManager: StateManager,
-  client: OpenCodeClient
+  client: OpenCodeClient,
+  messageQueue: MessageQueue
 ) {
   const log = getLogger()
 
@@ -169,6 +172,18 @@ export function registerCommands(
     } catch (error) {
       await ctx.reply(`Failed to abort: ${(error as Error).message}`)
     }
+  })
+
+  // Reset command
+  bot.command('reset', async (ctx) => {
+    if (!isAuthorized(ctx.from?.id.toString())) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    log.info('User command', { command: '/reset', userId: ctx.from?.id })
+    messageQueue.clear(ctx.chat.id)
+    await ctx.reply('🧹 Queue cleared and status reset to IDLE.')
   })
 
   // Clear command

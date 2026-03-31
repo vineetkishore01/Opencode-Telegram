@@ -14,6 +14,8 @@ const LOG_LEVELS: Record<LogLevel, number> = {
 export class Logger {
   private logFile: WriteStream
   private logLevel: LogLevel
+  private pendingWrites = 0
+  private flushInterval: NodeJS.Timeout | null = null
 
   constructor(config: BotConfig) {
     const logDir = dirname(config.logFile)
@@ -24,6 +26,16 @@ export class Logger {
       console.error(`Failed to write to log file: ${err.message}`)
     })
     this.logLevel = config.logLevel
+
+    // Periodic flush to ensure logs are written to disk
+    this.flushInterval = setInterval(() => {
+      if (this.pendingWrites > 0) {
+        this.logFile.end()
+        // Recreate stream after flush
+        this.logFile = createWriteStream(config.logFile, { flags: 'a' })
+        this.pendingWrites = 0
+      }
+    }, 5000)
   }
 
   private log(level: LogLevel, message: string, data?: any): void {
@@ -44,11 +56,10 @@ export class Logger {
       }
     }
 
-    // Only log to console for warnings and errors
-    if (level === 'warn' || level === 'error') {
-      console.log(logMessage)
-    }
+    // Log ALL levels to console (not just warn/error)
+    console.log(logMessage)
     
+    this.pendingWrites++
     this.logFile.write(logMessage + '\n')
   }
 
@@ -69,6 +80,9 @@ export class Logger {
   }
 
   close(): void {
+    if (this.flushInterval) {
+      clearInterval(this.flushInterval)
+    }
     this.logFile.end()
   }
 }

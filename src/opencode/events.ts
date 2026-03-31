@@ -45,8 +45,9 @@ export class EventProcessor {
 
       this.isPolling = true
       try {
-        // 0. Auto-process queue if idle
         const chatIds = this.stateManager.getAllChatIds()
+
+        // 0. Auto-process queue if idle
         for (const chatId of chatIds) {
           if (!this.messageQueue.isBusy(chatId) && this.messageQueue.getQueueLength(chatId) > 0) {
             log.info('Found pending messages in queue, auto-processing', { chatId })
@@ -69,7 +70,6 @@ export class EventProcessor {
             const status = (session as any).status
             
             // Check status: if we were busy and now it's idle (or status is missing/not busy), trigger idle handler
-            // Some versions of OpenCode might not return a status object if idle
             const isIdle = !status || status.type === 'idle' || (status.type !== 'busy' && status.type !== 'retry')
 
             if (this.messageQueue.isBusy(chatId) && isIdle) {
@@ -106,7 +106,15 @@ export class EventProcessor {
             }
 
           } catch (e) {
-            // Silent poll errors
+            log.warn('Poll error for session', { sessionId, chatId, error: (e as Error).message })
+            // If we were busy and poll fails, check if we've been stuck too long
+            if (this.messageQueue.isBusy(chatId)) {
+              const busyDuration = this.messageQueue.getBusyDuration(chatId)
+              if (busyDuration > 60000) {
+                log.warn('Session stuck busy for >60s, forcing idle after poll error', { chatId, sessionId })
+                this.messageQueue.setIdle(chatId)
+              }
+            }
           }
         }
 
@@ -570,6 +578,7 @@ export class EventProcessor {
     const chatId = this.stateManager.getChatIdForSession(sessionID)
     if (!chatId) return
 
+    // Update working message FIRST, before deleting it
     const working = this.workingSessions.get(sessionID)
     if (working) {
       await this.bot.api.editMessageText(
@@ -577,7 +586,6 @@ export class EventProcessor {
         working.messageId,
         '✅ Task completed!'
       ).catch(() => {})
-      this.workingSessions.delete(sessionID)
     }
 
     this.messageQueue.setIdle(chatId)
@@ -597,13 +605,16 @@ export class EventProcessor {
           modelId: selectedModel?.modelId,
           agent: selectedMode,
         })
-        next.resolve()
       } catch (error) {
         getLogger().error('Failed to process queued message', { error: (error as Error).message })
         await this.bot.api.sendMessage(chatId, `❌ Error: ${(error as Error).message}`).catch(() => {})
-        next.reject(error as Error)
+        this.messageQueue.setIdle(chatId)
       }
     } else {
+      // Only delete working message after queue is empty
+      if (working) {
+        this.workingSessions.delete(sessionID)
+      }
       await this.bot.api.sendMessage(chatId, '✅ *Done!*', { parse_mode: 'Markdown' }).catch(() => {})
     }
   }

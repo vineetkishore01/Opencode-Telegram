@@ -41,7 +41,7 @@ export function registerHandlers(
     // If session is busy, queue the message
     if (messageQueue.isBusy(ctx.chat.id)) {
       const position = messageQueue.getQueueLength(ctx.chat.id) + 1
-      await messageQueue.enqueue(ctx.chat.id, text)
+      messageQueue.enqueue(ctx.chat.id, text)
       await ctx.reply(`📋 Queued (position ${position}). Will process when current task finishes.`)
       return
     }
@@ -84,6 +84,11 @@ export function registerHandlers(
         `❌ Error: ${(error as Error).message}`
       )
     }
+
+    // CRITICAL: Always set idle after sending, since prompt_async returns immediately
+    // The event processor will re-set busy when it detects the session is actually working
+    // This prevents permanent stalling if the poll misses the idle transition
+    messageQueue.setIdle(ctx.chat.id)
   })
 
   // Handle callback queries (inline buttons)
