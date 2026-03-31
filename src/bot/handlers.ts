@@ -42,45 +42,35 @@ export function registerHandlers(
         return
       }
 
-      const isQueueBusy = messageQueue.isBusy(ctx.chat.id)
-      
-      // Check actual OpenCode session status - only queue if session is actually busy
-      let sessionActuallyBusy = false
-      if (isQueueBusy) {
-        try {
-          const sessionInfo = await client.getSession(sessionId)
-          sessionActuallyBusy = (sessionInfo as any).status?.type === 'busy'
-        } catch (e) {
-          // If we can't check status, assume busy to be safe
-          sessionActuallyBusy = true
-        }
-      }
-
-      if (isQueueBusy && sessionActuallyBusy) {
-        const position = messageQueue.getQueueLength(ctx.chat.id) + 1
+      // If session is busy, queue the message
+      if (eventProcessor.isSessionWorking(sessionId)) {
         messageQueue.enqueue(ctx.chat.id, text)
+        messageQueue.setBusy(ctx.chat.id)
+        const position = messageQueue.getQueueLength(ctx.chat.id)
+        log.info('Message queued', { sessionId, position })
         await ctx.reply(`📋 Queued (position ${position}). Will process when current task finishes.`)
         return
       }
 
-      // Session is actually idle - clear queue busy state and process immediately
-      if (isQueueBusy && !sessionActuallyBusy) {
-        messageQueue.setIdle(ctx.chat.id)
-      }
+      // Send working message
+      const workingMsg = await ctx.reply('⏳ OpenCode is working...').catch(() => null)
 
+      // Create tracker BEFORE sending to prevent initSession race
+      eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, workingMsg?.message_id || 0)
+      messageQueue.setBusy(ctx.chat.id)
+
+      // Send message to OpenCode (fire-and-forget to avoid blocking poll loop)
       const model = stateManager.getCurrentModel(ctx.chat.id)
       const mode = stateManager.getCurrentMode(ctx.chat.id)
 
-      messageQueue.setBusy(ctx.chat.id)
-
-      const workingMsg = await ctx.reply('⏳ OpenCode is working...').catch(() => null)
-      eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, workingMsg?.message_id || 0)
-      eventProcessor.resetActivityTimer(sessionId)
-
-      await client.sendAsyncMessage(sessionId, text, {
+      client.sendAsyncMessage(sessionId, text, {
         providerId: model?.providerId,
         modelId: model?.modelId,
         agent: mode,
+      }).catch((error: Error) => {
+        log.error('Failed to send to OpenCode', { error: error.message })
+        messageQueue.setIdle(ctx.chat.id)
+        ctx.reply(`❌ Error: ${error.message.substring(0, 500)}`).catch(() => {})
       })
 
       const count = stateManager.incrementPromptCount(ctx.chat.id)
@@ -91,6 +81,8 @@ export function registerHandlers(
       log.info('Sent to OpenCode', { sessionId })
     } catch (error) {
       log.error('Handler error', { error: (error as Error).message })
+      const sessionId = stateManager.getCurrentSession(ctx.chat.id)
+      if (sessionId) eventProcessor.markSessionIdle(sessionId)
       messageQueue.setIdle(ctx.chat.id)
       ctx.reply(`❌ Error: ${(error as Error).message.substring(0, 500)}`).catch(() => {})
     }

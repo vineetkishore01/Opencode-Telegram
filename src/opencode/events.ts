@@ -36,7 +36,9 @@ export class EventProcessor {
   private lastTodoHash = new Map<string, string>()
   private currentStepTitle = new Map<string, string>()
   private lastToolCall = new Map<string, string>()
-  private readonly POLL_INTERVAL_MS = 5000
+  private sessionWorking = new Set<string>()
+  private processedCompletions = new Set<string>()
+  private readonly POLL_INTERVAL_MS = 3000
   private readonly TODO_POLL_INTERVAL_MS = 30000
   private readonly WORKING_STATUS_INTERVAL_MS = 30000
   private lastTodoPollTime = new Map<string, number>()
@@ -156,16 +158,16 @@ export class EventProcessor {
             }
 
             if (this.messageQueue.isBusy(chatId)) {
-              const hasCompletedMessage = messages.some(m => {
-                if (m.role !== 'assistant' || !m.time?.completed) return false
-                const msgId = m.id || m.time?.created?.toString() || ''
-                return this.completedMessageIds.has(`${sessionId}:${msgId}`)
-              })
-
-              if (hasCompletedMessage) {
-                this.completedSessions.add(sessionId)
-                await this.handleSessionIdle({ sessionID: sessionId })
-                continue
+              const latestCompleted = messages.filter(m => m.role === 'assistant' && m.time?.completed).pop()
+              if (latestCompleted) {
+                const msgId = latestCompleted.id || latestCompleted.time?.created?.toString() || ''
+                const completionKey = `${sessionId}:${msgId}`
+                if (msgId && !this.processedCompletions.has(completionKey)) {
+                  this.processedCompletions.add(completionKey)
+                  this.completedSessions.add(sessionId)
+                  await this.handleSessionIdle({ sessionID: sessionId })
+                  continue
+                }
               }
             }
 
@@ -221,6 +223,12 @@ export class EventProcessor {
               this.completedMessageIds.delete(item)
             }
           }
+          if (this.processedCompletions.size > 1000) {
+            const items = Array.from(this.processedCompletions)
+            for (const item of items.slice(0, 500)) {
+              this.processedCompletions.delete(item)
+            }
+          }
         }
 
         await new Promise(resolve => setTimeout(resolve, this.POLL_INTERVAL_MS))
@@ -243,6 +251,15 @@ export class EventProcessor {
 
   resetActivityTimer(sessionId: string): void {
     this.lastActivityTime.set(sessionId, Date.now())
+  }
+
+  isSessionWorking(sessionId: string): boolean {
+    return this.messageQueue.isBusy(this.stateManager.getChatIdForSession(sessionId) || 0)
+  }
+
+  markSessionIdle(sessionId: string): void {
+    const chatId = this.stateManager.getChatIdForSession(sessionId)
+    if (chatId) this.messageQueue.setIdle(chatId)
   }
 
   getWorkingStatus(sessionId: string): string | null {
