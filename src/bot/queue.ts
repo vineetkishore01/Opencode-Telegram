@@ -10,15 +10,36 @@ interface QueuedMessage {
 export class MessageQueue {
   private queues = new Map<number, QueuedMessage[]>()
   private busyChats = new Set<number>()
+  private busyTimeouts = new Map<number, NodeJS.Timeout>()
 
   setBusy(chatId: number): void {
     getLogger().info('Chat marked BUSY', { chatId })
     this.busyChats.add(chatId)
+
+    // Clear existing timeout if any
+    if (this.busyTimeouts.has(chatId)) {
+      clearTimeout(this.busyTimeouts.get(chatId))
+    }
+
+    // Set a safety timeout (5 minutes) to prevent permanent hang
+    const timeout = setTimeout(() => {
+      if (this.isBusy(chatId)) {
+        getLogger().warn('Safety timeout: marking chat IDLE after 5 minutes of inactivity', { chatId })
+        this.setIdle(chatId)
+      }
+    }, 5 * 60 * 1000)
+    
+    this.busyTimeouts.set(chatId, timeout)
   }
 
   setIdle(chatId: number): void {
     getLogger().info('Chat marked IDLE', { chatId })
     this.busyChats.delete(chatId)
+    
+    if (this.busyTimeouts.has(chatId)) {
+      clearTimeout(this.busyTimeouts.get(chatId))
+      this.busyTimeouts.delete(chatId)
+    }
   }
 
   isBusy(chatId: number): boolean {

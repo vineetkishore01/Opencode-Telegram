@@ -45,6 +45,15 @@ export class EventProcessor {
 
       this.isPolling = true
       try {
+        // 0. Auto-process queue if idle
+        const chatIds = this.stateManager.getAllChatIds()
+        for (const chatId of chatIds) {
+          if (!this.messageQueue.isBusy(chatId) && this.messageQueue.getQueueLength(chatId) > 0) {
+            log.info('Found pending messages in queue, auto-processing', { chatId })
+            await this.handleSessionIdle({ sessionID: this.stateManager.getCurrentSession(chatId) })
+          }
+        }
+
         // 1. Check for pending permissions
         await this.permissionHandler.checkPendingPermissions().catch(() => {})
 
@@ -58,10 +67,14 @@ export class EventProcessor {
           try {
             // Fetch session info to check status
             const session = await this.client.getSession(sessionId)
+            const status = (session as any).status
             
-            // Check status: if we were busy and now it's idle, trigger idle handler
-            if (this.messageQueue.isBusy(chatId) && (session as any).status?.type === 'idle') {
-              log.info('Task finished, session became idle', { sessionId, chatId })
+            // Check status: if we were busy and now it's idle (or status is missing/not busy), trigger idle handler
+            // Some versions of OpenCode might not return a status object if idle
+            const isIdle = !status || status.type === 'idle' || (status.type !== 'busy' && status.type !== 'retry')
+
+            if (this.messageQueue.isBusy(chatId) && isIdle) {
+              log.info('Task finished, session detected as idle', { sessionId, chatId, statusType: status?.type })
               await this.handleSessionIdle({ sessionID: sessionId })
             }
 
@@ -186,7 +199,7 @@ export class EventProcessor {
 
     log.debug('Processing message part', { type: part.type, sessionID: part.sessionID })
 
-    if (part.type === 'reasoning' && part.time?.end && part.text?.trim()) {
+    if (part.type === 'reasoning' && part.text?.trim()) {
       const thinking = part.text.trim()
       if (thinking) {
         log.debug('Sending reasoning to Telegram', { length: thinking.length })
@@ -207,7 +220,7 @@ export class EventProcessor {
       await this.handleToolPart(chatId, part)
     }
 
-    if (part.type === 'text' && part.time?.end && part.text?.trim()) {
+    if (part.type === 'text' && part.text?.trim()) {
       if (part.ignored || part.synthetic) {
         log.debug('Ignoring synthetic or ignored text part', { partID: part.id })
         return
