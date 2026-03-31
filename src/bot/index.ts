@@ -39,7 +39,7 @@ export class TelegramBot {
   }
 
   private setup(): void {
-    registerCommands(this.bot, this.stateManager, this.openCodeClient, this.messageQueue, this.authorizedUserId)
+    registerCommands(this.bot, this.stateManager, this.openCodeClient, this.messageQueue, this.authorizedUserId, this.eventProcessor)
     registerHandlers(this.bot, this.stateManager, this.openCodeClient, this.permissionHandler, this.eventProcessor, this.messageQueue, this.authorizedUserId)
   }
 

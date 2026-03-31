@@ -1,6 +1,7 @@
 import { Bot } from 'grammy'
 import { StateManager } from '../state/manager.js'
 import { OpenCodeClient, Model, Provider } from '../opencode/client.js'
+import { EventProcessor } from '../opencode/events.js'
 import { escapeMarkdown, splitMessage } from '../utils/formatter.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -11,7 +12,8 @@ export function registerCommands(
   stateManager: StateManager,
   client: OpenCodeClient,
   messageQueue: MessageQueue,
-  authorizedUserId: string
+  authorizedUserId: string,
+  eventProcessor?: EventProcessor
 ) {
   const log = getLogger()
 
@@ -169,7 +171,8 @@ export function registerCommands(
 
     try {
       await client.abortSession(sessionId)
-      await ctx.reply('🛑 Session aborted.')
+      messageQueue.clear(ctx.chat.id)
+      await ctx.reply('🛑 Session aborted. Queue cleared.')
     } catch (error) {
       await ctx.reply(`Failed to abort: ${(error as Error).message}`)
     }
@@ -262,14 +265,40 @@ export function registerCommands(
     if (chatState.model) {
       message += `*Model:*\n`
       message += `${escapeMarkdown(chatState.model.providerId)}/${escapeMarkdown(chatState.model.modelId)}\n\n`
+    } else if (chatState.sessionId) {
+      try {
+        const session = await client.getSession(chatState.sessionId)
+        const sessionStatus = (session as any).status
+        if (sessionStatus?.model) {
+          message += `*Model:* ${escapeMarkdown(sessionStatus.model)}\n\n`
+        } else if (sessionStatus?.modelID) {
+          message += `*Model:* ${escapeMarkdown(sessionStatus.modelID)}\n\n`
+        } else {
+          message += `*Model:* (OpenCode default)\n\n`
+        }
+      } catch {
+        message += `*Model:* (OpenCode default)\n\n`
+      }
     } else {
-      message += `*Model:* Default\n\n`
+      message += `*Model:* (OpenCode default)\n\n`
     }
 
     if (chatState.mode) {
       message += `*Mode:* \`${escapeMarkdown(chatState.mode)}\`\n`
+    } else if (chatState.sessionId) {
+      try {
+        const session = await client.getSession(chatState.sessionId)
+        const sessionStatus = (session as any).status
+        if (sessionStatus?.agent) {
+          message += `*Mode:* \`${escapeMarkdown(sessionStatus.agent)}\`\n`
+        } else {
+          message += `*Mode:* (OpenCode default)\n`
+        }
+      } catch {
+        message += `*Mode:* (OpenCode default)\n`
+      }
     } else {
-      message += `*Mode:* Default\n`
+      message += `*Mode:* (OpenCode default)\n`
     }
 
     // Show cost for current session
@@ -754,14 +783,22 @@ export function registerCommands(
       }
 
       message += '*Usage:* `/mode <name>`\n\n'
-      message += 'Common modes:\n'
+      message += 'Allowed modes:\n'
       message += '• `build` - Code implementation\n'
-      message += '• `plan` - Planning and design\n'
-      message += '• `review` - Code review\n'
-      message += '• `debug` - Debugging\n\n'
+      message += '• `plan` - Planning and design\n\n'
       message += 'Use `/modes` to see all available.'
 
       await ctx.reply(message, { parse_mode: 'Markdown' })
+      return
+    }
+
+    if (args !== 'build' && args !== 'plan') {
+      await ctx.reply(
+        `❌ Invalid mode: \`${escapeMarkdown(args)}\`\n\n` +
+        'Only `build` and `plan` modes are allowed.\n' +
+        'Use `/mode build` or `/mode plan`.',
+        { parse_mode: 'Markdown' }
+      )
       return
     }
 
@@ -771,6 +808,124 @@ export function registerCommands(
       `✅ *Mode selected:* \`${escapeMarkdown(args)}\``,
       { parse_mode: 'Markdown' }
     )
+  })
+
+  // Working command
+  bot.command('working', async (ctx) => {
+    if (!isAuthorized(ctx.from?.id.toString())) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    log.info('User command', { command: '/working', userId: ctx.from?.id })
+
+    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
+    if (!sessionId) {
+      await ctx.reply('No session selected.')
+      return
+    }
+
+    if (eventProcessor) {
+      const status = eventProcessor.getWorkingStatus(sessionId)
+      if (status) {
+        await ctx.reply(`🔧 *Currently working:*\n${escapeMarkdown(status)}`, { parse_mode: 'Markdown' })
+        return
+      }
+    }
+
+    try {
+      const sessionInfo = await client.getSession(sessionId)
+      const isBusy = (sessionInfo as any).status?.type === 'busy'
+
+      if (isBusy) {
+        const todos = await client.getSessionTodo(sessionId)
+        const inProgress = todos.filter(t => t.status === 'in_progress')
+        const pending = todos.filter(t => t.status === 'pending')
+
+        let message = '🔧 *Working on:*\n\n'
+        if (inProgress.length > 0) {
+          message += '*In Progress:*\n'
+          for (const t of inProgress) {
+            message += `🔄 ${escapeMarkdown(t.content)}\n`
+          }
+          message += '\n'
+        }
+        if (pending.length > 0) {
+          message += '*Up Next:*\n'
+          for (const t of pending.slice(0, 5)) {
+            message += `⬜ ${escapeMarkdown(t.content)}\n`
+          }
+        }
+        if (inProgress.length === 0 && pending.length === 0) {
+          message += 'No tasks in todo list. OpenCode may be planning or thinking.'
+        }
+
+        await ctx.reply(message, { parse_mode: 'Markdown' })
+      } else {
+        await ctx.reply('✅ OpenCode is idle. No active work.')
+      }
+    } catch {
+      await ctx.reply('Could not check session status.')
+    }
+  })
+
+  // Working command
+  bot.command('working', async (ctx) => {
+    if (!isAuthorized(ctx.from?.id.toString())) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    log.info('User command', { command: '/working', userId: ctx.from?.id })
+
+    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
+    if (!sessionId) {
+      await ctx.reply('No session selected.')
+      return
+    }
+
+    if (eventProcessor) {
+      const status = eventProcessor.getWorkingStatus(sessionId)
+      if (status) {
+        await ctx.reply(`🔧 *Currently working:*\n${escapeMarkdown(status)}`, { parse_mode: 'Markdown' })
+        return
+      }
+    }
+
+    try {
+      const sessionInfo = await client.getSession(sessionId)
+      const isBusy = (sessionInfo as any).status?.type === 'busy'
+
+      if (isBusy) {
+        const todos = await client.getSessionTodo(sessionId)
+        const inProgress = todos.filter(t => t.status === 'in_progress')
+        const pending = todos.filter(t => t.status === 'pending')
+
+        let message = '🔧 *Working on:*\n\n'
+        if (inProgress.length > 0) {
+          message += '*In Progress:*\n'
+          for (const t of inProgress) {
+            message += `🔄 ${escapeMarkdown(t.content)}\n`
+          }
+          message += '\n'
+        }
+        if (pending.length > 0) {
+          message += '*Up Next:*\n'
+          for (const t of pending.slice(0, 5)) {
+            message += `⬜ ${escapeMarkdown(t.content)}\n`
+          }
+        }
+        if (inProgress.length === 0 && pending.length === 0) {
+          message += 'No tasks in todo list. OpenCode may be planning or thinking.'
+        }
+
+        await ctx.reply(message, { parse_mode: 'Markdown' })
+      } else {
+        await ctx.reply('✅ OpenCode is idle. No active work.')
+      }
+    } catch {
+      await ctx.reply('Could not check session status.')
+    }
   })
 
   // Help command
@@ -790,7 +945,10 @@ export function registerCommands(
       '/sessions - List recent sessions\n' +
       '/continue - Continue old session (interactive)\n' +
       '/status - Show current status\n' +
+      '/working - Show what OpenCode is doing now\n' +
       '/abort - Stop running session\n' +
+      '/delete - Delete current session\n' +
+      '/reset - Reset queue and status\n' +
       '/clear - Clear current settings\n\n' +
       '*Model Commands:*\n' +
       '/providers - List AI providers\n' +
@@ -799,7 +957,7 @@ export function registerCommands(
       '/model <provider> <model> - Select model\n\n' +
       '*Mode Commands:*\n' +
       '/mode - Show current mode\n' +
-      '/mode <name> - Select mode\n' +
+      '/mode <name> - Select mode (build/plan only)\n' +
       '/modes - List available modes\n\n' +
       '*File Commands:*\n' +
       '/files [path] - List files in directory\n' +
@@ -808,15 +966,17 @@ export function registerCommands(
       '*Info Commands:*\n' +
       '/cost - Show cost tracking\n' +
       '/todo - Show task list\n' +
-      '/diff - Show file changes\n\n' +
+      '/diff - Show file changes\n' +
+      '/working - Show current working task\n\n' +
       '*Usage:*\n' +
       'Just send any message to prompt OpenCode!\n' +
       'Multiple messages are queued and processed in order.\n\n' +
       '*Tips:*\n' +
       '• Use `/providers` then `/models <provider>` to browse\n' +
-      '• Use `/mode plan` for planning\n' +
-      '• Use `/mode build` for coding\n' +
+      '• Use `/mode plan` for planning, `/mode build` for coding\n' +
       '• Use `/abort` to stop a running task\n' +
+      '• Use `/working` to check what OpenCode is doing\n' +
+      '• Use `/todo` to see the task list\n' +
       '• Send multiple messages — they queue automatically',
       { parse_mode: 'Markdown' }
     )
