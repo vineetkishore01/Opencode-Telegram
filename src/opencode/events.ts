@@ -123,6 +123,31 @@ export class EventProcessor {
         await this.handleStepStarted(sessionId, state, event.data)
         break
 
+      case 'question.asked':
+        await this.handleQuestionAsked(sessionId, state, event.data)
+        break
+
+      case 'session.error':
+        await this.handleSessionError(sessionId, state, event.data)
+        break
+
+      case 'session.updated':
+        await this.handleSessionUpdated(sessionId, state, event.data)
+        break
+
+      case 'todo.updated':
+        await this.handleTodoUpdated(sessionId, state, event.data)
+        break
+
+      case 'message.removed':
+      case 'message.part.removed':
+        await this.handleMessageRemoved(sessionId, state, event.data)
+        break
+
+      case 'session.status':
+        await this.handleSessionStatus(sessionId, state, event.data)
+        break
+
       case 'error':
         await this.handleError(sessionId, state, event.data)
         break
@@ -240,6 +265,54 @@ export class EventProcessor {
     this.queueMessage(state.chatId, `🚀 *${escapeMarkdown(title)}*`, { parse_mode: 'Markdown' })
   }
 
+  private async handleQuestionAsked(sessionId: string, state: SessionState, data: any): Promise<void> {
+    const questionId = data.id || data.questionId
+    const question = data.question || data.text || 'Please answer this question'
+    const options = data.options || []
+    const header = data.header || 'Question'
+
+    if (!questionId) {
+      getLogger().warn('Question event without ID', { sessionId })
+      return
+    }
+
+    // Build inline keyboard with options
+    const inlineKeyboard: any = {
+      inline_keyboard: []
+    }
+
+    if (options.length > 0) {
+      // Add option buttons (max 4 per row as per Telegram limits)
+      const buttonsPerRow = 4
+      for (let i = 0; i < options.length; i += buttonsPerRow) {
+        const row = []
+        for (let j = i; j < Math.min(i + buttonsPerRow, options.length); j++) {
+          row.push({
+            text: options[j],
+            callback_data: `q:${questionId}:${j}`
+          })
+        }
+        inlineKeyboard.inline_keyboard.push(row)
+      }
+      // Add reject button
+      inlineKeyboard.inline_keyboard.push([{
+        text: '❌ Skip',
+        callback_data: `q:${questionId}:reject`
+      }])
+    } else {
+      // If no options, provide simple acknowledge buttons
+      inlineKeyboard.inline_keyboard = [
+        [
+          { text: '✅ Yes', callback_data: `q:${questionId}:0` },
+          { text: '❌ No', callback_data: `q:${questionId}:reject` }
+        ]
+      ]
+    }
+
+    const message = `❓ *${escapeMarkdown(header)}*\n\n${escapeMarkdown(question)}`
+    this.queueMessage(state.chatId, message, { reply_markup: inlineKeyboard, parse_mode: 'Markdown' })
+  }
+
   private async handleError(sessionId: string, state: SessionState, data: any): Promise<void> {
     const errorMsg = stripAnsi(data.message || data.error || 'Unknown error').substring(0, 500)
     this.queueMessage(state.chatId, `❌ *Error:* ${escapeMarkdown(errorMsg)}`, { parse_mode: 'Markdown' })
@@ -247,6 +320,60 @@ export class EventProcessor {
     state.isWorking = false
     this.workingSessions.delete(sessionId)
     this.messageQueue.setIdle(state.chatId)
+  }
+
+  private async handleSessionError(sessionId: string, state: SessionState, data: any): Promise<void> {
+    const errorMsg = stripAnsi(data.message || data.error?.message || 'Session error').substring(0, 500)
+    this.queueMessage(state.chatId, `❌ *Session Error:* ${escapeMarkdown(errorMsg)}`, { parse_mode: 'Markdown' })
+
+    state.isWorking = false
+    this.workingSessions.delete(sessionId)
+    this.messageQueue.setIdle(state.chatId)
+  }
+
+  private async handleSessionUpdated(sessionId: string, state: SessionState, data: any): Promise<void> {
+    // Session metadata updated (e.g., title change)
+    const title = data.title || data.summary
+    if (title) {
+      getLogger().debug('Session updated', { sessionId, title })
+    }
+  }
+
+  private async handleTodoUpdated(sessionId: string, state: SessionState, data: any): Promise<void> {
+    const todos = data.todos || []
+    if (todos.length === 0) return
+
+    // Build a concise todo summary
+    const activeTodos = todos.filter((t: any) => t.status !== 'completed')
+    const completedCount = todos.length - activeTodos.length
+    const summary = activeTodos.slice(0, 5).map((t: any) => {
+      const icon = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜'
+      return `${icon} ${t.content || ''}`
+    }).join('\n')
+
+    let msg = `📋 *Todo List* (${completedCount}/${todos.length} completed)\n${escapeMarkdown(summary)}`
+    if (activeTodos.length > 5) {
+      msg += `\n_... and ${activeTodos.length - 5} more_`
+    }
+    this.queueMessage(state.chatId, msg, { parse_mode: 'Markdown' })
+  }
+
+  private async handleMessageRemoved(sessionId: string, state: SessionState, data: any): Promise<void> {
+    // Message or part removed - mostly informational
+    getLogger().debug('Message/part removed', { sessionId })
+  }
+
+  private async handleSessionStatus(sessionId: string, state: SessionState, data: any): Promise<void> {
+    const status = data.status || data.state
+    if (status === 'idle' && state.isWorking) {
+      state.isWorking = false
+      this.workingSessions.delete(sessionId)
+      this.messageQueue.setIdle(state.chatId)
+      this.queueMessage(state.chatId, '✅ *Session idle*', { parse_mode: 'Markdown' })
+      await this.processNextQueuedMessage(sessionId, state.chatId)
+    } else if ((status === 'active' || status === 'busy') && !state.isWorking) {
+      state.isWorking = true
+    }
   }
 
   /**

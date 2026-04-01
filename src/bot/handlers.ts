@@ -148,6 +148,7 @@ export function registerHandlers(
           return
         }
         try {
+          // Send the index as the answer (OpenCode expects the option index)
           await client.replyQuestion(questionId, [String(answerIdx)])
           const buttonText = `Option ${answerIdx + 1}`
           await ctx.editMessageText(`✅ Answered: ${buttonText}`).catch(() => {})

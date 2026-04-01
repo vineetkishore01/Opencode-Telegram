@@ -138,6 +138,96 @@ opencode-tele --uninstall          # Remove project config
 | `/diff` | Show file changes |
 | `/help` | Show all commands |
 
+## 🛠️ OpenCode Tools
+
+OpenCode provides the LLM with built-in tools that are automatically available during sessions. The bot relays tool events to Telegram in real-time.
+
+### Available Tools
+
+| Tool | Icon | Description |
+|------|------|-------------|
+| `bash` | 🖥️ | Execute shell commands |
+| `edit` | ✏️ | Modify existing files |
+| `write` | 📝 | Create or overwrite files |
+| `read` | 📖 | Read file contents |
+| `grep` | 🔍 | Search file contents (regex) |
+| `glob` | 🔍 | Find files by pattern |
+| `list` | 📁 | List directory contents |
+| `lsp` | 🔧 | LSP code intelligence (experimental) |
+| `apply_patch` | 🩹 | Apply patches to files |
+| `skill` | 🎓 | Load skill documentation |
+| `todowrite` | 📋 | Manage todo lists |
+| `webfetch` | 🌐 | Fetch web content from URLs |
+| `websearch` | 🔎 | Search the web (Exa AI) |
+| `question` | ❓ | Ask user questions (MCQs) |
+
+### Web Search
+
+OpenCode supports two web-related tools:
+
+- **`websearch`**: Performs web searches using Exa AI. Useful for finding current information, researching topics, or gathering information beyond training data. Requires `OPENCODE_ENABLE_EXA=1` environment variable or using the OpenCode provider.
+- **`webfetch`**: Fetches and reads content from specific URLs. Useful for looking up documentation or retrieving content from known sources.
+
+To enable web search when starting the bot:
+
+```bash
+OPENCODE_ENABLE_EXA=1 opencode-tele
+```
+
+### Question Handling
+
+When the LLM needs clarification or user input, it can ask questions via the `question` tool. The bot displays these as inline keyboards with:
+- Option buttons for each choice
+- A "Skip" button to dismiss the question
+- Support for custom answers when no options are provided
+
+Questions are displayed with a ❓ header and the question text.
+
+## 🛠️ OpenCode Tools
+
+OpenCode provides the LLM with built-in tools that are automatically available during sessions. The bot relays tool events to Telegram in real-time.
+
+### Available Tools
+
+| Tool | Icon | Description |
+|------|------|-------------|
+| `bash` | 🖥️ | Execute shell commands |
+| `edit` | ✏️ | Modify existing files |
+| `write` | 📝 | Create or overwrite files |
+| `read` | 📖 | Read file contents |
+| `grep` | 🔍 | Search file contents (regex) |
+| `glob` | 🔍 | Find files by pattern |
+| `list` | 📁 | List directory contents |
+| `lsp` | 🔧 | LSP code intelligence (experimental) |
+| `apply_patch` | 🩹 | Apply patches to files |
+| `skill` | 🎓 | Load skill documentation |
+| `todowrite` | 📋 | Manage todo lists |
+| `webfetch` | 🌐 | Fetch web content from URLs |
+| `websearch` | 🔎 | Search the web (Exa AI) |
+| `question` | ❓ | Ask user questions (MCQs) |
+
+### Web Search
+
+OpenCode supports two web-related tools:
+
+- **`websearch`**: Performs web searches using Exa AI. Useful for finding current information, researching topics, or gathering information beyond training data. Requires `OPENCODE_ENABLE_EXA=1` environment variable or using the OpenCode provider.
+- **`webfetch`**: Fetches and reads content from specific URLs. Useful for looking up documentation or retrieving content from known sources.
+
+To enable web search when starting the bot:
+
+```bash
+OPENCODE_ENABLE_EXA=1 opencode-tele
+```
+
+### Question Handling
+
+When the LLM needs clarification or user input, it can ask questions via the `question` tool. The bot displays these as inline keyboards with:
+- Option buttons for each choice
+- A "Skip" button to dismiss the question
+- Support for custom answers when no options are provided
+
+Questions are displayed with a ❓ header and the question text.
+
 ### Quick Start Guide
 
 1. **Create session**: Send `/session`
@@ -147,17 +237,96 @@ opencode-tele --uninstall          # Remove project config
 
 ## 🔧 Architecture
 
+### System Overview
+
+```mermaid
+graph TB
+    User["👤 User (Telegram)"]
+    Bot["🤖 Telegram Bot (grammY)"]
+    Queue["📬 Message Queue (Atomic)"]
+    Client["🌐 OpenCode Client (HTTP/SSE)"]
+    Server["⚙️ OpenCode Server (localhost)"]
+    State["💾 State Manager (JSON)"]
+    Events["📡 Event Processor (SSE)"]
+    Perms["🔐 Permission Handler"]
+
+    User -->|"Messages & Commands"| Bot
+    Bot -->|"Non-command text"| Queue
+    Queue -->|"Relay prompt"| Client
+    Client -->|"POST /prompt_async"| Server
+    Server -->|"SSE /event"| Events
+    Events -->|"Notifications"| User
+    Bot -->|"Permission replies"| Perms
+    Perms -->|"POST /permissions"| Server
+    Bot -->|"State queries"| State
+    Events -->|"State updates"| State
 ```
-┌──────────┐     ┌─────────┐     ┌──────────────┐     ┌────────────┐
-│ Telegram │ ──▶ │  Bot    │ ──▶ │ EventProcessor│ ──▶ │   SSE      │
-│          │ ◀── │         │ ◀── │ (event-driven)│ ◀── │ /event     │
-└──────────┘     └─────────┘     └──────────────┘     └────────────┘
-                                         │
-                                         ▼
-                                  ┌─────────────┐
-                                  │ OpenCode    │
-                                  │ (localhost) │
-                                  └─────────────┘
+
+### Event Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Telegram Bot
+    participant Q as Message Queue
+    participant OC as OpenCode Client
+    participant S as OpenCode Server
+    participant E as Event Processor
+
+    U->>T: Send message
+    T->>Q: Check busy state
+    alt Session busy
+        Q->>T: Queue message (position N)
+    else Session idle
+        Q->>T: Send "Working..."
+        T->>OC: POST /prompt_async
+        OC->>S: Send prompt
+        S-->>E: SSE: message.started
+        E->>U: "OpenCode is working..."
+        S-->>E: SSE: tool.started (websearch, bash, etc.)
+        E->>U: Tool notification
+        S-->>E: SSE: question.asked
+        E->>U: Question with inline keyboard
+        U->>T: Select option
+        T->>OC: POST /question/{id}/reply
+        OC->>S: Submit answer
+        S-->>E: SSE: message.completed
+        E->>U: "✅ Done!"
+        Q->>T: Process next queued message
+    end
+```
+
+### Component Interactions
+
+```mermaid
+graph LR
+    subgraph "Telegram Layer"
+        Cmd["Commands (23)"]
+        Hdl["Handlers"]
+        Q["Queue"]
+    end
+
+    subgraph "OpenCode Layer"
+        Clt["HTTP Client"]
+        Srv["Server Manager"]
+        Evts["Event Processor"]
+        Perm["Permission Handler"]
+    end
+
+    subgraph "State Layer"
+        State["StateManager"]
+        Config["Config"]
+    end
+
+    Cmd --> Hdl
+    Hdl --> Q
+    Hdl --> Clt
+    Hdl --> Perm
+    Evts --> Hdl
+    Clt --> Srv
+    State --> Cmd
+    State --> Hdl
+    Config --> Clt
 ```
 
 ### Key Design Decisions
@@ -169,14 +338,10 @@ opencode-tele --uninstall          # Remove project config
 | **Network** | Localhost only - no tunnels, no remote access |
 | **Message Queue** | Atomic enqueue to prevent race conditions |
 | **Security** | Single authorized user, no multi-tenant support |
-
-### What This Bot Does NOT Do
-
-- ❌ No ngrok/Cloudflare tunnels (unless explicitly enabled with `--tunnel`)
-- ❌ No remote server exposure (by default)
-- ❌ No multi-user support
-- ❌ No cloud sync
-- ❌ No webhook-based Telegram integration (uses long polling)
+| **Question Handling** | Inline keyboards with option buttons + skip |
+| **Permission Handling** | Inline keyboards with Once/Always/Reject |
+| **Question Handling** | Inline keyboards with option buttons + skip |
+| **Permission Handling** | Inline keyboards with Once/Always/Reject |
 
 ## ⚙️ Configuration
 
