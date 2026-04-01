@@ -360,4 +360,8 @@ export class OpenCodeClient {
       return []
     }
   }
+
+  async getSessionStatus(sessionId: string): Promise<{ status: string; model?: string; agent?: string }> {
+    return this.request(`/session/${sessionId}/status`)
+  }
 }

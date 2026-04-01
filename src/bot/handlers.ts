@@ -10,149 +10,141 @@ export function registerHandlers(
   bot: Bot,
   stateManager: StateManager,
   client: OpenCodeClient,
-  authorizedUserId: string,
   permissionHandler: PermissionHandler,
   eventProcessor: EventProcessor,
   messageQueue: MessageQueue
 ) {
   const log = getLogger()
 
+  // Handle text messages
   bot.on('message:text', async (ctx) => {
+    const userId = ctx.from?.id.toString()
+    if (userId !== process.env.AUTHORIZED_USER_ID) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
+    if (!sessionId) {
+      await ctx.reply('No session selected. Use /session to create or select one.')
+      return
+    }
+
+    const text = ctx.message.text
+
+    // Skip if it's a command
+    if (text.startsWith('/')) {
+      return
+    }
+
+    // If session is busy, queue the message
+    if (messageQueue.isBusy(ctx.chat.id)) {
+      try {
+        const position = messageQueue.getQueueLength(ctx.chat.id) + 1
+        await messageQueue.enqueue(ctx.chat.id, text)
+        await ctx.reply(`📋 Queued (position ${position}). Will process when current task finishes.`)
+      } catch (error) {
+        await ctx.reply(`❌ Failed to queue message: ${(error as Error).message}`)
+      }
+      return
+    }
+
+    // Get selected model and mode if any
+    const selectedModel = stateManager.getCurrentModel(ctx.chat.id)
+    const selectedMode = stateManager.getCurrentMode(ctx.chat.id)
+
+    // Increment prompt counter
+    const count = stateManager.incrementPromptCount(ctx.chat.id)
+    if (count > 0 && count % 10 === 0) {
+      await ctx.reply(`📊 You've sent ${count} prompts. Use /cost to check spending.`)
+    }
+
+    // Mark session as busy
+    messageQueue.setBusy(ctx.chat.id)
+
+    // Send "working" message
+    const workingMsg = await ctx.reply('⏳ OpenCode is working...')
+
+    // Store the working message so we can update it when done
+    eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, workingMsg.message_id)
+
     try {
-      if (!ctx.from) return
-      const userId = ctx.from.id.toString()
-      const text = ctx.message.text
-      log.info('Incoming message', { userId, chatId: ctx.chat.id, text: text.substring(0, 100) })
-
-      if (userId !== authorizedUserId) {
-        log.warn('Unauthorized access attempt', { userId, chatId: ctx.chat.id })
-        await ctx.reply('You are not authorized to use this bot.')
-        return
-      }
-
-      if (text.startsWith('/')) return
-
-      if (text.length > 4096) {
-        await ctx.reply('Message too long. Maximum is 4096 chars.')
-        return
-      }
-
-      const sessionId = stateManager.getCurrentSession(ctx.chat.id)
-      if (!sessionId) {
-        await ctx.reply('No session selected. Use /session to create or select one.')
-        return
-      }
-
-      // Register session for event tracking if not already tracked
-      eventProcessor.trackSession(sessionId, ctx.chat.id)
-
-      // Atomically check if session is working and queue if needed
-      if (eventProcessor.isSessionWorking(sessionId) || messageQueue.isBusy(ctx.chat.id)) {
-        // Queue the message atomically (prevents race condition)
-        const wasQueued = messageQueue.tryEnqueueAndSetBusy(ctx.chat.id, text)
-        if (wasQueued) {
-          const position = messageQueue.getQueueLength(ctx.chat.id)
-          log.info('Message queued', { sessionId, position })
-          await ctx.reply(`📋 Queued (position ${position}). Will process when current task finishes.`)
-        } else {
-          log.debug('Duplicate message ignored', { sessionId })
-        }
-        return
-      }
-
-      // Send working message
-      const workingMsg = await ctx.reply('⏳ OpenCode is working...').catch(() => null)
-
-      // Create tracker BEFORE sending to prevent race conditions
-      // Use messageId 0 as sentinel if working message failed to send
-      const workingMessageId = workingMsg?.message_id || 0
-      eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, workingMessageId)
-      if (workingMsg) {
-        log.debug('Working message set', { sessionId, messageId: workingMsg.message_id })
-      } else {
-        log.warn('Failed to send working message, using sentinel', { sessionId })
-      }
-
-      messageQueue.setBusy(ctx.chat.id)
-
-      const model = stateManager.getCurrentModel(ctx.chat.id)
-      const mode = stateManager.getCurrentMode(ctx.chat.id)
-
-      log.info('Relaying to OpenCode', { sessionId, text: text.substring(0, 50) })
-
-      // Fire-and-forget to avoid blocking handler
-      client.sendAsyncMessage(sessionId, text, {
-        providerId: model?.providerId,
-        modelId: model?.modelId,
-        agent: mode,
-      }).catch((error: Error) => {
-        log.error('Failed to relay to OpenCode', { error: error.message })
-        messageQueue.setIdle(ctx.chat.id)
-        ctx.reply(`❌ Error: ${error.message.substring(0, 500)}`).catch(() => {})
+      // Send async message to OpenCode with model and mode selection
+      await client.sendAsyncMessage(sessionId, text, {
+        providerId: selectedModel?.providerId,
+        modelId: selectedModel?.modelId,
+        agent: selectedMode,
       })
 
-      stateManager.incrementPromptCount(ctx.chat.id)
+      log.info('Sent to OpenCode')
     } catch (error) {
-      log.error('Handler error', { error: (error as Error).message })
-      const sessionId = stateManager.getCurrentSession(ctx.chat.id)
-      if (sessionId) {
-        eventProcessor.markSessionIdle(sessionId)
-      }
+      log.error('Failed to send message', { error: (error as Error).message })
       messageQueue.setIdle(ctx.chat.id)
-      ctx.reply(`❌ Error: ${(error as Error).message.substring(0, 500)}`).catch(() => {})
+
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        workingMsg.message_id,
+        `❌ Error: ${(error as Error).message}`
+      )
+
+      // Try to process queue in case there are waiting messages
+      const next = messageQueue.dequeue(ctx.chat.id)
+      if (next) {
+        messageQueue.setBusy(ctx.chat.id)
+        try {
+          const newWorkingMsg = await ctx.reply('⏳ Processing next queued message...')
+          eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, newWorkingMsg.message_id)
+          await client.sendAsyncMessage(sessionId, next.text, {
+            providerId: selectedModel?.providerId,
+            modelId: selectedModel?.modelId,
+            agent: selectedMode,
+          })
+          next.resolve()
+        } catch {
+          messageQueue.setIdle(ctx.chat.id)
+          next.reject(error as Error)
+        }
+      }
     }
   })
 
+  // Handle callback queries (inline buttons)
   bot.on('callback_query:data', async (ctx) => {
-    if (!ctx.from) {
-      log.warn('Callback received without sender info')
-      await ctx.answerCallbackQuery()
-      return
-    }
-    const userId = ctx.from.id.toString()
+    const userId = ctx.from?.id.toString()
     const data = ctx.callbackQuery.data
-    log.info('Incoming callback', { userId, chatId: ctx.chat?.id, data: data.substring(0, 50) })
 
-    if (userId !== authorizedUserId) {
-      log.warn('Unauthorized callback attempt', { userId, data: data.substring(0, 50) })
+    if (userId !== process.env.AUTHORIZED_USER_ID) {
       await ctx.answerCallbackQuery('Not authorized')
       return
     }
 
+    // Permission callbacks
     if (data.startsWith('perm:')) {
       await permissionHandler.handlePermissionReply(ctx.callbackQuery)
       return
     }
 
+    // Question callbacks: q:<questionId>:<answerIndex> or q:reject:<questionId>
     if (data.startsWith('q:')) {
       const parts = data.split(':')
       if (parts[1] === 'reject') {
         const questionId = parts[2]
-        if (!questionId) {
-          await ctx.answerCallbackQuery('Invalid data')
-          return
-        }
         try {
           await client.rejectQuestion(questionId)
-          await ctx.editMessageText('❌ Question dismissed').catch(() => {})
           await ctx.answerCallbackQuery('Question dismissed')
+          await ctx.editMessageText('❌ Question dismissed')
         } catch (error) {
           log.error('Failed to reject question', { error: (error as Error).message })
           await ctx.answerCallbackQuery('Failed to dismiss')
         }
       } else {
         const questionId = parts[1]
-        const answerIdx = parseInt(parts[2], 10)
-        if (!questionId || isNaN(answerIdx)) {
-          await ctx.answerCallbackQuery('Invalid data')
-          return
-        }
+        const answerIndex = parseInt(parts[2], 10)
         try {
-          // Send the index as the answer (OpenCode expects the option index)
-          await client.replyQuestion(questionId, [String(answerIdx)])
-          const buttonText = `Option ${answerIdx + 1}`
-          await ctx.editMessageText(`✅ Answered: ${buttonText}`).catch(() => {})
+          await client.replyQuestion(questionId, [String(answerIndex)])
+          const buttonText = `Option ${answerIndex + 1}`
           await ctx.answerCallbackQuery(`Selected: ${buttonText}`)
+          await ctx.editMessageText(`✅ Answered: ${buttonText}`)
         } catch (error) {
           log.error('Failed to reply to question', { error: (error as Error).message })
           await ctx.answerCallbackQuery('Failed to answer')
@@ -161,27 +153,26 @@ export function registerHandlers(
       return
     }
 
+    // Session selection callbacks
     if (data.startsWith('session:')) {
       const sessionId = data.replace('session:', '')
-      if (!sessionId) {
-        await ctx.answerCallbackQuery('Invalid session')
-        return
-      }
-      if (!ctx.chat) {
-        log.warn('Callback without chat info')
-        await ctx.answerCallbackQuery()
-        return
-      }
-      stateManager.setCurrentSession(ctx.chat.id, sessionId)
+      stateManager.setCurrentSession(ctx.chat!.id, sessionId)
 
       await ctx.answerCallbackQuery('Session selected')
-      await ctx.editMessageText(`✅ Session selected: \`${sessionId}\``, { parse_mode: 'Markdown' }).catch(() => {})
+      await ctx.editMessageText(`✅ Session selected: \`${sessionId}\``, { parse_mode: 'Markdown' })
+      return
+    }
+
+    // Model page navigation
+    if (data.startsWith('models_page:')) {
+      // Handled by commands.ts
       return
     }
 
     await ctx.answerCallbackQuery()
   })
 
+  // Handle errors
   bot.catch((err) => {
     log.error('Bot error', { error: err.message })
   })

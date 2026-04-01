@@ -1,39 +1,25 @@
 import { getLogger } from '../utils/logger.js'
-import { StateManager } from '../state/manager.js'
 
 interface QueuedMessage {
   chatId: number
   text: string
+  timestamp: number
+  resolve: () => void
+  reject: (error: Error) => void
 }
 
 export class MessageQueue {
   private queues = new Map<number, QueuedMessage[]>()
   private busyChats = new Set<number>()
-  private lastBusyTime = new Map<number, number>()
-
-  constructor(private stateManager: StateManager) {}
-
-  loadPersisted(): void {
-    try {
-      const persisted = this.stateManager.getQueuedMessages()
-      // Clear stale messages from previous session - they're no longer valid
-      for (const msg of persisted) {
-        this.stateManager.removeQueuedMessage(msg.chatId, msg.text)
-      }
-      getLogger().info('Cleared stale persisted queue', { count: persisted.length })
-    } catch (err) {
-      getLogger().error('Failed to clear persisted queue', { error: (err as Error).message })
-    }
-  }
+  private readonly MAX_QUEUE_SIZE = 50
+  private readonly QUEUE_TIMEOUT_MS = 30 * 60 * 1000
 
   setBusy(chatId: number): void {
     this.busyChats.add(chatId)
-    this.lastBusyTime.set(chatId, Date.now())
   }
 
   setIdle(chatId: number): void {
     this.busyChats.delete(chatId)
-    this.lastBusyTime.delete(chatId)
   }
 
   isBusy(chatId: number): boolean {
@@ -44,52 +30,56 @@ export class MessageQueue {
     return this.queues.get(chatId)?.length || 0
   }
 
-  enqueue(chatId: number, text: string): void {
-    if (!this.queues.has(chatId)) this.queues.set(chatId, [])
-    const queue = this.queues.get(chatId)!
-    if (queue.some(m => m.text === text)) return
-    queue.push({ chatId, text })
-    this.stateManager.addQueuedMessage(chatId, text)
-    getLogger().info('Message queued', { chatId, queueLength: queue.length })
-  }
-
-  /**
-   * Atomically enqueue a message and mark the chat as busy.
-   * Returns true if the message was queued, false if it was a duplicate.
-   */
-  tryEnqueueAndSetBusy(chatId: number, text: string): boolean {
-    if (!this.queues.has(chatId)) this.queues.set(chatId, [])
-    const queue = this.queues.get(chatId)!
-    if (queue.some(m => m.text === text)) return false
-    queue.push({ chatId, text })
-    this.stateManager.addQueuedMessage(chatId, text)
-    this.busyChats.add(chatId)
-    this.lastBusyTime.set(chatId, Date.now())
-    getLogger().info('Message queued atomically', { chatId, queueLength: queue.length })
-    return true
+  enqueue(chatId: number, text: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.queues.has(chatId)) {
+        this.queues.set(chatId, [])
+      }
+      const queue = this.queues.get(chatId)!
+      if (queue.length >= this.MAX_QUEUE_SIZE) {
+        reject(new Error('Queue is full (max 50 messages)'))
+        return
+      }
+      queue.push({ chatId, text, timestamp: Date.now(), resolve, reject })
+      getLogger().debug('Message enqueued', { chatId, queueLength: queue.length })
+    })
   }
 
   dequeue(chatId: number): QueuedMessage | undefined {
     const queue = this.queues.get(chatId)
     if (!queue || queue.length === 0) return undefined
-    const msg = queue.shift()!
-    this.stateManager.removeQueuedMessage(msg.chatId, msg.text)
-    if (queue.length === 0) this.queues.delete(chatId)
-    return msg
+    return queue.shift()
   }
 
   clear(chatId: number): void {
     const queue = this.queues.get(chatId)
     if (queue) {
-      for (const msg of queue) this.stateManager.removeQueuedMessage(msg.chatId, msg.text)
+      for (const msg of queue) {
+        msg.reject(new Error('Queue cleared'))
+      }
+      this.queues.delete(chatId)
     }
-    this.queues.delete(chatId)
     this.busyChats.delete(chatId)
-    this.lastBusyTime.delete(chatId)
   }
 
-  getBusyDuration(chatId: number): number {
-    const start = this.lastBusyTime.get(chatId)
-    return start ? Date.now() - start : 0
+  getStaleMessages(chatId: number): QueuedMessage[] {
+    const queue = this.queues.get(chatId)
+    if (!queue) return []
+    const now = Date.now()
+    const stale: QueuedMessage[] = []
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (now - queue[i].timestamp > this.QUEUE_TIMEOUT_MS) {
+        const [removed] = queue.splice(i, 1)
+        stale.push(removed)
+      }
+    }
+    return stale
+  }
+
+  purgeStale(chatId: number): void {
+    const stale = this.getStaleMessages(chatId)
+    for (const msg of stale) {
+      msg.reject(new Error('Message expired (timeout)'))
+    }
   }
 }

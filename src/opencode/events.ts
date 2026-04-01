@@ -1,40 +1,43 @@
 import { Bot } from 'grammy'
-import { OpenCodeClient, OpenCodeEvent } from './client.js'
+import { OpenCodeClient } from './client.js'
 import { StateManager } from '../state/manager.js'
 import { PermissionHandler } from './permission.js'
 import { MessageQueue } from '../bot/queue.js'
-import { escapeMarkdown, splitMessage, stripAnsi, getFileIcon } from '../utils/formatter.js'
+import { escapeMarkdown, splitMessage, stripAnsi } from '../utils/formatter.js'
 import { getLogger } from '../utils/logger.js'
 
-interface OutgoingMessage {
+interface BusySessionInfo {
   chatId: number
-  text: string
-  options?: any
+  sessionId: string
+  lastMessageCount: number
+  lastProcessedMessageId?: string
+  processedStepFinishIds: Set<string>
+  startedAt: number
+  lastActivityAt: number
+  idleProcessing: boolean
+  lastTodoHash: string
+  lastWorkingStatus: string
+  lastToolCall: string
+  stepStartSeen: boolean
+  currentStepTitle: string
 }
 
-/**
- * EventProcessor - Handles OpenCode SSE events and relays them to Telegram
- * 
- * Architecture:
- * 1. Subscribes to OpenCode SSE event stream once on startup
- * 2. Events are pushed in real-time (no polling!)
- * 3. Each session tracks its own state independently
- * 4. Outgoing messages are queued and rate-limited per chat
- */
+interface TodoItem {
+  content: string
+  status: string
+  priority: string
+}
+
 export class EventProcessor {
   private running = false
-  private workingSessions = new Map<string, { chatId: number; messageId: number }>()
-  private outgoingQueues = new Map<number, OutgoingMessage[]>()
-  private queueProcessing = new Set<number>()
-
-  // Session state tracking
-  private sessionStates = new Map<string, {
-    chatId: number
-    isWorking: boolean
-    currentStep?: string
-  }>()
-
-  private readonly RATE_LIMIT_DELAY_MS = 500
+  private workingSessions = new Map<string, { chatId: number; messageId: number; statusMessageId?: number }>()
+  private consecutiveErrors = 0
+  private maxConsecutiveErrors = 10
+  private busySessions = new Map<string, BusySessionInfo>()
+  private readonly SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000
+  private readonly POLL_INTERVAL_MS = 3000
+  private readonly TODO_POLL_INTERVAL_MS = 10000
+  private readonly WORKING_STATUS_INTERVAL_MS = 15000
 
   constructor(
     private client: OpenCodeClient,
@@ -49,504 +52,584 @@ export class EventProcessor {
     this.running = true
 
     const log = getLogger()
-    log.info('Event processor started (SSE mode)')
+    log.info('Event processor started (Polling mode)')
 
+    let todoPollCounter = 0
+    let statusPollCounter = 0
+
+    while (this.running) {
+      try {
+        await this.permissionHandler.checkPendingPermissions().catch(() => {})
+
+        const chatIds = this.stateManager.getAllChatIds()
+        for (const chatId of chatIds) {
+          const sessionId = this.stateManager.getCurrentSession(chatId)
+          if (!sessionId) continue
+
+          const isBusy = this.messageQueue.isBusy(chatId)
+
+          if (isBusy && !this.busySessions.has(sessionId)) {
+            try {
+              const messages = await this.client.getMessages(sessionId, 5)
+              const todos = await this.client.getSessionTodo(sessionId).catch(() => [])
+              this.busySessions.set(sessionId, {
+                chatId,
+                sessionId,
+                lastMessageCount: messages.length,
+                processedStepFinishIds: new Set(),
+                startedAt: Date.now(),
+                lastActivityAt: Date.now(),
+                idleProcessing: false,
+                lastTodoHash: this.hashTodos(todos),
+                lastWorkingStatus: '',
+                lastToolCall: '',
+                stepStartSeen: false,
+                currentStepTitle: '',
+              })
+            } catch {
+              // Ignore - will retry next poll
+            }
+          } else if (!isBusy) {
+            this.busySessions.delete(sessionId)
+          }
+        }
+
+        todoPollCounter++
+        statusPollCounter++
+
+        const sessionsToProcess = [...this.busySessions.entries()]
+        for (const [sessionId, busyInfo] of sessionsToProcess) {
+          try {
+            const messages = await this.client.getMessages(sessionId, 5)
+
+            busyInfo.lastActivityAt = Date.now()
+
+            const latestAssistant = messages
+              .filter(m => m.role === 'assistant')
+              .pop()
+
+            if (latestAssistant && latestAssistant.time?.completed) {
+              log.info('Detected session completion via polling', { sessionId, chatId: busyInfo.chatId })
+              this.busySessions.delete(sessionId)
+              await this.processSessionIdle(sessionId, busyInfo.chatId)
+            } else {
+              if (messages.length !== busyInfo.lastMessageCount) {
+                busyInfo.lastMessageCount = messages.length
+                await this.processNewMessages(busyInfo.chatId, sessionId, messages, busyInfo)
+              }
+
+              if (todoPollCounter >= Math.floor(this.TODO_POLL_INTERVAL_MS / this.POLL_INTERVAL_MS)) {
+                await this.pollTodos(busyInfo)
+              }
+
+              if (statusPollCounter >= Math.floor(this.WORKING_STATUS_INTERVAL_MS / this.POLL_INTERVAL_MS)) {
+                await this.pollWorkingStatus(busyInfo)
+              }
+            }
+          } catch (error) {
+            log.warn('Failed to poll busy session', { sessionId, error: (error as Error).message })
+            this.busySessions.delete(sessionId)
+            this.messageQueue.setIdle(busyInfo.chatId)
+
+            const working = this.workingSessions.get(sessionId)
+            if (working) {
+              await this.bot.api.editMessageText(
+                working.chatId,
+                working.messageId,
+                '❌ Connection to OpenCode lost'
+              ).catch(() => {})
+              this.workingSessions.delete(sessionId)
+            }
+          }
+        }
+
+        if (todoPollCounter >= Math.floor(this.TODO_POLL_INTERVAL_MS / this.POLL_INTERVAL_MS)) {
+          todoPollCounter = 0
+        }
+        if (statusPollCounter >= Math.floor(this.WORKING_STATUS_INTERVAL_MS / this.POLL_INTERVAL_MS)) {
+          statusPollCounter = 0
+        }
+
+        for (const [sessionId, busyInfo] of [...this.busySessions.entries()]) {
+          if (!this.messageQueue.isBusy(busyInfo.chatId)) {
+            this.busySessions.delete(sessionId)
+          }
+        }
+
+        for (const [sessionId, busyInfo] of [...this.busySessions.entries()]) {
+          const age = Date.now() - busyInfo.startedAt
+          const inactive = Date.now() - busyInfo.lastActivityAt
+          if (age > this.SESSION_TIMEOUT_MS || inactive > this.SESSION_TIMEOUT_MS) {
+            log.warn('Session timed out, forcing idle', { sessionId, age, inactive })
+            this.busySessions.delete(sessionId)
+            this.messageQueue.setIdle(busyInfo.chatId)
+
+            const working = this.workingSessions.get(sessionId)
+            if (working) {
+              await this.bot.api.editMessageText(
+                working.chatId,
+                working.messageId,
+                '⏰ Session timed out (4 hour limit)'
+              ).catch(() => {})
+              this.workingSessions.delete(sessionId)
+            }
+
+            await this.processSessionIdle(sessionId, busyInfo.chatId)
+          }
+        }
+
+        for (const chatId of chatIds) {
+          this.messageQueue.purgeStale(chatId)
+        }
+
+        this.consecutiveErrors = 0
+        await new Promise(resolve => setTimeout(resolve, this.POLL_INTERVAL_MS))
+      } catch (error) {
+        this.consecutiveErrors++
+        log.error('Polling error', { error: (error as Error).message, consecutiveErrors: this.consecutiveErrors })
+
+        if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
+          log.error('Too many consecutive errors, stopping event processor')
+          this.running = false
+          break
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 5000))
+      }
+    }
+  }
+
+  private async pollTodos(busyInfo: BusySessionInfo): Promise<void> {
     try {
-      // Subscribe to SSE event stream
-      await this.client.subscribeEvents((event) => {
-        this.handleEvent(event).catch(err => {
-          log.error('Event handler failed', { error: (err as Error).message })
-        })
-      })
-    } catch (error) {
-      log.error('Failed to start event processor', { error: (error as Error).message })
-      this.running = false
-      throw error
-    }
-  }
+      const todos = await this.client.getSessionTodo(busyInfo.sessionId)
+      const currentHash = this.hashTodos(todos)
 
-  private async handleEvent(event: OpenCodeEvent): Promise<void> {
-    const log = getLogger()
-    const sessionId = event.sessionId
-
-    if (!sessionId) {
-      log.debug('Event without session', { type: event.type })
-      return
-    }
-
-    const state = this.sessionStates.get(sessionId)
-    if (!state) {
-      log.debug('Event for untracked session', { sessionId, type: event.type })
-      return
-    }
-
-    log.debug('Received event', { sessionId, type: event.type })
-
-    switch (event.type) {
-      case 'session.created':
-      case 'session.started':
-        await this.handleSessionStarted(sessionId, state, event.data)
-        break
-
-      case 'message.created':
-      case 'message.started':
-        await this.handleMessageStarted(sessionId, state, event.data)
-        break
-
-      case 'message.part.created':
-        await this.handleMessagePartCreated(sessionId, state, event.data)
-        break
-
-      case 'message.part.updated':
-        await this.handleMessagePartUpdated(sessionId, state, event.data)
-        break
-
-      case 'message.completed':
-        await this.handleMessageCompleted(sessionId, state, event.data)
-        break
-
-      case 'session.completed':
-      case 'session.idle':
-        await this.handleSessionIdle(sessionId, state, event.data)
-        break
-
-      case 'permission.requested':
-        await this.handlePermissionRequested(sessionId, state, event.data)
-        break
-
-      case 'tool.started':
-      case 'tool.completed':
-        await this.handleToolEvent(sessionId, state, event.data)
-        break
-
-      case 'step.started':
-        await this.handleStepStarted(sessionId, state, event.data)
-        break
-
-      case 'question.asked':
-        await this.handleQuestionAsked(sessionId, state, event.data)
-        break
-
-      case 'session.error':
-        await this.handleSessionError(sessionId, state, event.data)
-        break
-
-      case 'session.updated':
-        await this.handleSessionUpdated(sessionId, state, event.data)
-        break
-
-      case 'todo.updated':
-        await this.handleTodoUpdated(sessionId, state, event.data)
-        break
-
-      case 'message.removed':
-      case 'message.part.removed':
-        await this.handleMessageRemoved(sessionId, state, event.data)
-        break
-
-      case 'session.status':
-        await this.handleSessionStatus(sessionId, state, event.data)
-        break
-
-      case 'error':
-        await this.handleError(sessionId, state, event.data)
-        break
-    }
-  }
-
-  private async handleSessionStarted(sessionId: string, state: SessionState, data: any): Promise<void> {
-    // Session started - ready to receive messages
-    getLogger().debug('Session started', { sessionId })
-  }
-
-  private async handleMessageStarted(sessionId: string, state: SessionState, data: any): Promise<void> {
-    // Mark session as working
-    state.isWorking = true
-    this.workingSessions.set(sessionId, { chatId: state.chatId, messageId: 0 })
-  }
-
-  private async handleMessagePartCreated(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const part = data.part || data
-    const partType = part.type
-
-    if (partType === 'text' || partType === 'reasoning') {
-      const text = stripAnsi(part.text || '')
-      if (!text.trim()) return
-
-      const prefix = partType === 'reasoning' ? '🤔 *Thinking:*\n' : '📝 *Response:*\n'
-      this.queueMessage(state.chatId, prefix + escapeMarkdown(text), { parse_mode: 'Markdown' })
-    }
-
-    if (partType === 'file') {
-      await this.handleFilePart(state.chatId, part)
-    }
-  }
-
-  private async handleMessagePartUpdated(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const part = data.part || data
-    const partType = part.type
-
-    if (partType === 'text' || partType === 'reasoning') {
-      // For updates, we could send deltas, but for simplicity send full text
-      const text = stripAnsi(part.text || '')
-      if (!text.trim()) return
-
-      // Only send if significantly different from last
-      const prefix = partType === 'reasoning' ? '🤔 *Thinking:*\n' : '📝 *Response:*\n'
-      this.queueMessage(state.chatId, prefix + escapeMarkdown(text.substring(0, 4000)), { parse_mode: 'Markdown' })
-    }
-  }
-
-  private async handleMessageCompleted(sessionId: string, state: SessionState, data: any): Promise<void> {
-    state.isWorking = false
-
-    // Update working message to show completion
-    const working = this.workingSessions.get(sessionId)
-    if (working && working.messageId !== 0) {
-      this.queueMessage(working.chatId, '✅ Task completed!', { editMessageId: working.messageId })
-    } else {
-      this.queueMessage(state.chatId, '✅ *Done!*', { parse_mode: 'Markdown' })
-    }
-
-    this.workingSessions.delete(sessionId)
-
-    // Process next queued message
-    await this.processNextQueuedMessage(sessionId, state.chatId)
-  }
-
-  private async handleSessionIdle(sessionId: string, state: SessionState, data: any): Promise<void> {
-    state.isWorking = false
-    this.workingSessions.delete(sessionId)
-    this.messageQueue.setIdle(state.chatId)
-
-    // Send completion notification if not already sent
-    this.queueMessage(state.chatId, '✅ *Done!*', { parse_mode: 'Markdown' })
-
-    // Process next queued message
-    await this.processNextQueuedMessage(sessionId, state.chatId)
-  }
-
-  private async handlePermissionRequested(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const permission: any = {
-      id: data.id || data.requestId,
-      sessionID: sessionId,
-      type: data.type,
-      description: data.description,
-      options: data.options,
-      status: 'pending'
-    }
-    await this.permissionHandler.handlePermissionRequest(permission)
-  }
-
-  private async handleToolEvent(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const toolName = data.tool || 'unknown'
-    const status = data.state?.status || data.status
-    const icons: Record<string, string> = { bash: '🖥️', edit: '✏️', write: '📝', read: '📖', grep: '🔍', glob: '🔍', todowrite: '📋', websearch: '🌐' }
-    const icon = icons[toolName] || '🔧'
-
-    if (status === 'running') {
-      const title = stripAnsi(data.state?.title || '').substring(0, 100)
-      if (title) {
-        this.queueMessage(state.chatId, `⏳ ${icon} *${title}*`, { parse_mode: 'Markdown' })
+      if (currentHash !== busyInfo.lastTodoHash && todos.length > 0) {
+        busyInfo.lastTodoHash = currentHash
+        await this.sendTodoUpdate(busyInfo.chatId, todos)
       }
-    } else if (status === 'completed') {
-      let msg = `${icon} ${toolName}`
-      if (toolName === 'bash' && data.state?.output) {
-        const out = stripAnsi(data.state.output).trim().substring(0, 200)
-        if (out) msg += `\n\`\`\`\n${out}\n\`\`\``
-      }
-      this.queueMessage(state.chatId, msg, { parse_mode: 'Markdown' })
+    } catch {
+      // Ignore todo poll errors
     }
   }
 
-  private async handleStepStarted(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const title = data.title || data.stepName || 'Step started'
-    state.currentStep = title
-    this.queueMessage(state.chatId, `🚀 *${escapeMarkdown(title)}*`, { parse_mode: 'Markdown' })
-  }
+  private async pollWorkingStatus(busyInfo: BusySessionInfo): Promise<void> {
+    try {
+      const messages = await this.client.getMessages(busyInfo.sessionId, 3)
+      const latest = messages[messages.length - 1]
+      if (!latest || latest.role !== 'assistant' || !latest.parts) return
 
-  private async handleQuestionAsked(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const questionId = data.id || data.questionId
-    const question = data.question || data.text || 'Please answer this question'
-    const options = data.options || []
-    const header = data.header || 'Question'
+      const activeTools: Array<{ tool: string; title: string }> = []
+      let currentStep = ''
 
-    if (!questionId) {
-      getLogger().warn('Question event without ID', { sessionId })
-      return
-    }
-
-    // Build inline keyboard with options
-    const inlineKeyboard: any = {
-      inline_keyboard: []
-    }
-
-    if (options.length > 0) {
-      // Add option buttons (max 4 per row as per Telegram limits)
-      const buttonsPerRow = 4
-      for (let i = 0; i < options.length; i += buttonsPerRow) {
-        const row = []
-        for (let j = i; j < Math.min(i + buttonsPerRow, options.length); j++) {
-          row.push({
-            text: options[j],
-            callback_data: `q:${questionId}:${j}`
+      for (const part of latest.parts) {
+        if (part.type === 'step-start') {
+          currentStep = (part as any).title || (part as any).label || ''
+        }
+        if (part.type === 'tool' && part.state?.status === 'running') {
+          activeTools.push({
+            tool: part.tool || 'unknown',
+            title: stripAnsi(part.state?.title || ''),
           })
         }
-        inlineKeyboard.inline_keyboard.push(row)
       }
-      // Add reject button
-      inlineKeyboard.inline_keyboard.push([{
-        text: '❌ Skip',
-        callback_data: `q:${questionId}:reject`
-      }])
-    } else {
-      // If no options, provide simple acknowledge buttons
-      inlineKeyboard.inline_keyboard = [
-        [
-          { text: '✅ Yes', callback_data: `q:${questionId}:0` },
-          { text: '❌ No', callback_data: `q:${questionId}:reject` }
-        ]
-      ]
-    }
 
-    const message = `❓ *${escapeMarkdown(header)}*\n\n${escapeMarkdown(question)}`
-    this.queueMessage(state.chatId, message, { reply_markup: inlineKeyboard, parse_mode: 'Markdown' })
-  }
+      const statusText = this.buildWorkingStatus(currentStep, activeTools)
+      if (statusText && statusText !== busyInfo.lastWorkingStatus) {
+        busyInfo.lastWorkingStatus = statusText
+        busyInfo.currentStepTitle = currentStep
 
-  private async handleError(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const errorMsg = stripAnsi(data.message || data.error || 'Unknown error').substring(0, 500)
-    this.queueMessage(state.chatId, `❌ *Error:* ${escapeMarkdown(errorMsg)}`, { parse_mode: 'Markdown' })
-
-    state.isWorking = false
-    this.workingSessions.delete(sessionId)
-    this.messageQueue.setIdle(state.chatId)
-  }
-
-  private async handleSessionError(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const errorMsg = stripAnsi(data.message || data.error?.message || 'Session error').substring(0, 500)
-    this.queueMessage(state.chatId, `❌ *Session Error:* ${escapeMarkdown(errorMsg)}`, { parse_mode: 'Markdown' })
-
-    state.isWorking = false
-    this.workingSessions.delete(sessionId)
-    this.messageQueue.setIdle(state.chatId)
-  }
-
-  private async handleSessionUpdated(sessionId: string, state: SessionState, data: any): Promise<void> {
-    // Session metadata updated (e.g., title change)
-    const title = data.title || data.summary
-    if (title) {
-      getLogger().debug('Session updated', { sessionId, title })
+        const working = this.workingSessions.get(busyInfo.sessionId)
+        if (working?.statusMessageId) {
+          await this.bot.api.editMessageText(
+            working.chatId,
+            working.statusMessageId,
+            statusText,
+            { parse_mode: 'Markdown' }
+          ).catch(() => {})
+        }
+      }
+    } catch {
+      // Ignore working status poll errors
     }
   }
 
-  private async handleTodoUpdated(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const todos = data.todos || []
-    if (todos.length === 0) return
+  private buildWorkingStatus(step: string, tools: Array<{ tool: string; title: string }>): string {
+    const parts: string[] = []
 
-    // Build a concise todo summary
-    const activeTodos = todos.filter((t: any) => t.status !== 'completed')
-    const completedCount = todos.length - activeTodos.length
-    const summary = activeTodos.slice(0, 5).map((t: any) => {
-      const icon = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜'
-      return `${icon} ${t.content || ''}`
-    }).join('\n')
-
-    let msg = `📋 *Todo List* (${completedCount}/${todos.length} completed)\n${escapeMarkdown(summary)}`
-    if (activeTodos.length > 5) {
-      msg += `\n_... and ${activeTodos.length - 5} more_`
+    if (step) {
+      parts.push(`🚀 *Step:* ${escapeMarkdown(step)}`)
     }
-    this.queueMessage(state.chatId, msg, { parse_mode: 'Markdown' })
+
+    for (const t of tools.slice(0, 3)) {
+      const icon = this.getToolIcon(t.tool)
+      const name = this.formatToolName(t.tool)
+      if (t.title) {
+        parts.push(`${icon} *${name}:* ${escapeMarkdown(t.title.substring(0, 80))}`)
+      } else {
+        parts.push(`${icon} *${name}*`)
+      }
+    }
+
+    if (parts.length === 0) return ''
+
+    return `🔧 *Working...*\n\n${parts.join('\n')}`
   }
 
-  private async handleMessageRemoved(sessionId: string, state: SessionState, data: any): Promise<void> {
-    // Message or part removed - mostly informational
-    getLogger().debug('Message/part removed', { sessionId })
+  private async sendTodoUpdate(chatId: number, todos: TodoItem[]): Promise<void> {
+    const statusIcon: Record<string, string> = {
+      completed: '✅', in_progress: '🔄', pending: '⬜', cancelled: '❌',
+    }
+
+    const pendingTodos = todos.filter(t => t.status !== 'completed' && t.status !== 'cancelled')
+    if (pendingTodos.length === 0) return
+
+    let message = `📋 *Todo List (${pendingTodos.length} remaining):*\n\n`
+    for (const todo of todos.slice(0, 15)) {
+      const icon = statusIcon[todo.status] || '⬜'
+      const content = todo.content?.substring(0, 80) || ''
+      message += `${icon} ${escapeMarkdown(content)}\n`
+    }
+
+    await this.sendWithRateLimit(chatId, message, { parse_mode: 'Markdown' })
   }
 
-  private async handleSessionStatus(sessionId: string, state: SessionState, data: any): Promise<void> {
-    const status = data.status || data.state
-    if (status === 'idle' && state.isWorking) {
-      state.isWorking = false
+  private hashTodos(todos: TodoItem[]): string {
+    return todos.map(t => `${t.status}:${t.content}`).join('|')
+  }
+
+  private async processSessionIdle(sessionId: string, chatId: number): Promise<void> {
+    const existingBusy = this.busySessions.get(sessionId)
+    if (existingBusy?.idleProcessing) return
+    if (existingBusy) {
+      existingBusy.idleProcessing = true
+    }
+
+    const working = this.workingSessions.get(sessionId)
+    if (working) {
+      await this.bot.api.editMessageText(
+        working.chatId,
+        working.messageId,
+        '✅ Task completed!'
+      ).catch(() => {})
+      if (working.statusMessageId) {
+        await this.bot.api.deleteMessage(working.chatId, working.statusMessageId).catch(() => {})
+      }
       this.workingSessions.delete(sessionId)
-      this.messageQueue.setIdle(state.chatId)
-      this.queueMessage(state.chatId, '✅ *Session idle*', { parse_mode: 'Markdown' })
-      await this.processNextQueuedMessage(sessionId, state.chatId)
-    } else if ((status === 'active' || status === 'busy') && !state.isWorking) {
-      state.isWorking = true
-    }
-  }
-
-  /**
-   * Register a session for event tracking
-   */
-  trackSession(sessionId: string, chatId: number): void {
-    const log = getLogger()
-
-    if (this.sessionStates.has(sessionId)) {
-      log.debug('Session already tracked', { sessionId })
-      return
     }
 
-    this.sessionStates.set(sessionId, {
-      chatId,
-      isWorking: false
-    })
+    this.messageQueue.setIdle(chatId)
 
-    log.info('Session tracked', { sessionId, chatId })
-  }
+    const next = this.messageQueue.dequeue(chatId)
+    if (next) {
+      this.messageQueue.setBusy(chatId)
+      const selectedModel = this.stateManager.getCurrentModel(chatId)
+      const selectedMode = this.stateManager.getCurrentMode(chatId)
 
-  /**
-   * Clear tracking for a session (e.g., on abort or session change)
-   */
-  resetTracking(sessionId: string): void {
-    const log = getLogger()
-    log.info('Resetting session tracking', { sessionId })
+      try {
+        const workingMsg = await this.bot.api.sendMessage(chatId, '⏳ Processing next message...')
+        this.setWorkingMessage(sessionId, chatId, workingMsg.message_id)
 
-    const state = this.sessionStates.get(sessionId)
-    if (state) {
-      this.messageQueue.clear(state.chatId)
-    }
-
-    this.sessionStates.delete(sessionId)
-    this.workingSessions.delete(sessionId)
-  }
-
-  /**
-   * Check if session is currently working
-   */
-  isSessionWorking(sessionId: string): boolean {
-    const state = this.sessionStates.get(sessionId)
-    return state?.isWorking || false
-  }
-
-  /**
-   * Mark session as idle
-   */
-  markSessionIdle(sessionId: string): void {
-    const state = this.sessionStates.get(sessionId)
-    if (state) {
-      state.isWorking = false
-    }
-    this.workingSessions.delete(sessionId)
-  }
-
-  /**
-   * Set working message for a session
-   */
-  setWorkingMessage(sessionId: string, chatId: number, messageId: number): void {
-    this.workingSessions.set(sessionId, { chatId, messageId })
-
-    const state = this.sessionStates.get(sessionId)
-    if (state) {
-      state.isWorking = true
-    }
-  }
-
-  private async processNextQueuedMessage(sessionId: string, chatId: number): Promise<void> {
-    const log = getLogger()
-
-    const queuedMsg = this.messageQueue.dequeue(chatId)
-    if (!queuedMsg) {
-      this.messageQueue.setIdle(chatId)
-      return
-    }
-
-    log.info('Processing queued message', { sessionId, chatId })
-
-    try {
-      const workingMsg = await this.bot.api.sendMessage(chatId, '⏳ Processing queued message...')
-      this.setWorkingMessage(sessionId, chatId, workingMsg.message_id)
-
-      const model = this.stateManager.getCurrentModel(chatId)
-      const mode = this.stateManager.getCurrentMode(chatId)
-
-      this.client.sendAsyncMessage(sessionId, queuedMsg.text, {
-        providerId: model?.providerId,
-        modelId: model?.modelId,
-        agent: mode,
-      }).catch((error: Error) => {
-        log.error('Failed to send queued message', { error: error.message })
+        await this.client.sendAsyncMessage(sessionId, next.text, {
+          providerId: selectedModel?.providerId,
+          modelId: selectedModel?.modelId,
+          agent: selectedMode,
+        })
+        next.resolve()
+      } catch (error) {
+        getLogger().error('Failed to process queued message', { error: (error as Error).message })
+        await this.bot.api.sendMessage(chatId, `❌ Error: ${(error as Error).message}`).catch(() => {})
+        next.reject(error as Error)
         this.messageQueue.setIdle(chatId)
-        this.workingSessions.delete(sessionId)
-        this.bot.api.sendMessage(chatId, `❌ Error: ${error.message.substring(0, 500)}`).catch(() => {})
-      })
-    } catch (error) {
-      log.error('Failed to process queued message', { error: (error as Error).message })
-      this.messageQueue.setIdle(chatId)
-      this.workingSessions.delete(sessionId)
+      }
+    } else {
+      await this.bot.api.sendMessage(chatId, '✅ *Done!*', { parse_mode: 'Markdown' }).catch(() => {})
     }
   }
 
-  private queueMessage(chatId: number, text: string, options?: any): void {
-    if (!this.outgoingQueues.has(chatId)) {
-      this.outgoingQueues.set(chatId, [])
-    }
-    this.outgoingQueues.get(chatId)!.push({ chatId, text, options })
-    this.processOutgoingQueue(chatId)
-  }
+  private async processNewMessages(chatId: number, sessionId: string, messages: any[], busyInfo: BusySessionInfo): Promise<void> {
+    for (const msg of messages) {
+      if (msg.role !== 'assistant' || !msg.parts) continue
+      if (busyInfo.lastProcessedMessageId && msg.id === busyInfo.lastProcessedMessageId) continue
 
-  private async processOutgoingQueue(chatId: number): Promise<void> {
-    if (this.queueProcessing.has(chatId)) return
-    this.queueProcessing.add(chatId)
-
-    try {
-      while (true) {
-        const queue = this.outgoingQueues.get(chatId)
-        if (!queue || queue.length === 0) break
-
-        const msg = queue[0]
-        try {
-          if (msg.options?.editMessageId) {
-            await this.bot.api.editMessageText(chatId, msg.options.editMessageId, msg.text, msg.options)
-          } else {
-            await this.bot.api.sendMessage(chatId, msg.text, msg.options).catch(async (err) => {
-              if (msg.options?.parse_mode === 'Markdown' && (err.description?.includes('parse') || err.description?.includes('entity') || err.description?.includes('too long'))) {
-                const escaped = escapeMarkdown(msg.text)
-                const chunks = splitMessage(escaped)
-                for (const chunk of chunks) {
-                  await this.bot.api.sendMessage(chatId, chunk, { ...msg.options, parse_mode: undefined })
-                }
-                return
-              }
-              throw err
-            })
+      for (const part of msg.parts) {
+        if (part.type === 'step-start') {
+          const stepTitle = (part as any).title || (part as any).label || ''
+          if (stepTitle && stepTitle !== busyInfo.currentStepTitle) {
+            busyInfo.currentStepTitle = stepTitle
+            busyInfo.stepStartSeen = true
+            await this.sendWithRateLimit(
+              chatId,
+              `🚀 *Step started:* ${escapeMarkdown(stepTitle)}`,
+              { parse_mode: 'Markdown' }
+            )
           }
-          queue.shift()
-          await new Promise(resolve => setTimeout(resolve, this.RATE_LIMIT_DELAY_MS))
-        } catch (error: any) {
-          if (error.description?.includes('rate limit') || error.error_code === 429) {
-            const retryAfter = (error.parameters?.retry_after || 1) + 1
-            await new Promise(resolve => setTimeout(resolve, retryAfter * 1000))
-          } else {
-            getLogger().error('Fatal Telegram send error', { error: error.message, text: msg.text.substring(0, 200) })
-            queue.shift()
+        }
+
+        if (part.type === 'reasoning' && part.time?.end && part.text?.trim()) {
+          const thinking = part.text.trim()
+          const maxLen = 2000
+          const displayText = thinking.length > maxLen ? thinking.substring(0, maxLen) + '...' : thinking
+          await this.sendWithRateLimit(
+            chatId,
+            `🤔 *Thinking:*\n${escapeMarkdown(displayText)}`,
+            { parse_mode: 'Markdown' }
+          )
+        }
+
+        if (part.type === 'text' && part.time?.end && part.text?.trim()) {
+          if (part.ignored || part.synthetic) continue
+          const text = stripAnsi(part.text.trim())
+          if (text) {
+            const chunks = splitMessage(`📝 *Response:*\n${escapeMarkdown(text)}`)
+            for (const chunk of chunks) {
+              await this.sendWithRateLimit(chatId, chunk, { parse_mode: 'Markdown' })
+            }
+          }
+        }
+
+        if (part.type === 'tool' && part.state?.status === 'running') {
+          const toolName = part.tool || 'unknown'
+          const icon = this.getToolIcon(toolName)
+          const title = stripAnsi(part.state?.title || '')
+          const toolKey = `${toolName}:${title}`
+          if (title && toolKey !== busyInfo.lastToolCall) {
+            busyInfo.lastToolCall = toolKey
+            await this.sendWithRateLimit(
+              chatId,
+              `⏳ ${icon} *${this.formatToolName(toolName)}:* ${escapeMarkdown(title.substring(0, 100))}`,
+              { parse_mode: 'Markdown' }
+            )
+          }
+        }
+
+        if (part.type === 'step-finish') {
+          const stepId = part.id || `${msg.id}-${part.type}`
+          if (busyInfo.processedStepFinishIds.has(stepId)) continue
+          busyInfo.processedStepFinishIds.add(stepId)
+
+          const tokens = part.tokens
+          const cost = part.cost
+          if (tokens || cost) {
+            let info = '📊 '
+            if (tokens) {
+              info += `${tokens.input || 0}→${tokens.output || 0} tokens`
+              if (tokens.reasoning && tokens.reasoning > 0) {
+                info += ` (${tokens.reasoning} reasoning)`
+              }
+              if (tokens.cache?.read > 0 || tokens.cache?.write > 0) {
+                info += ` [cache: ${tokens.cache.read}r/${tokens.cache.write}w]`
+              }
+            }
+            if (cost && cost > 0) {
+              info += ` • $${cost.toFixed(4)}`
+            }
+            this.stateManager.addCost(
+              sessionId,
+              cost || 0,
+              tokens?.input || 0,
+              tokens?.output || 0,
+              tokens?.reasoning || 0,
+              tokens?.cache?.read || 0,
+              tokens?.cache?.write || 0
+            )
+            await this.sendWithRateLimit(chatId, info)
           }
         }
       }
-    } finally {
-      this.queueProcessing.delete(chatId)
+
+      busyInfo.lastProcessedMessageId = msg.id
     }
   }
 
-  private async handleFilePart(chatId: number, part: any): Promise<void> {
-    const filename = part.filename || part.source?.path || 'file'
-    let msg = `${getFileIcon(filename)} \`${escapeMarkdown(filename)}\``
-    if (part.source?.text?.value) {
-      const snippet = part.source.text.value.substring(0, 150).trim()
-      if (snippet) msg += `\n\`\`\`\n${snippet}\n\`\`\``
+  private async sendWithRateLimit(chatId: number, text: string, options?: any): Promise<void> {
+    try {
+      await this.bot.api.sendMessage(chatId, text, options)
+    } catch (error: any) {
+      if (error.description?.includes('rate limit') || error.error_code === 429) {
+        const retryAfter = error.parameters?.retry_after || 1
+        getLogger().warn('Telegram rate limited, waiting', { retryAfter })
+        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000))
+        try {
+          await this.bot.api.sendMessage(chatId, text, options)
+        } catch {
+          // Give up on this message
+        }
+      }
     }
-    this.queueMessage(chatId, msg, { parse_mode: 'Markdown' })
   }
 
   stop(): void {
     this.running = false
-    this.client.unsubscribeEvents()
-    getLogger().info('Event processor stopped')
   }
-}
 
-interface SessionState {
-  chatId: number
-  isWorking: boolean
-  currentStep?: string
+  setWorkingMessage(sessionId: string, chatId: number, messageId: number): void {
+    this.workingSessions.set(sessionId, { chatId, messageId })
+  }
+
+  getWorkingStatus(sessionId: string): string | null {
+    const busyInfo = this.busySessions.get(sessionId)
+    if (!busyInfo) return null
+
+    const parts: string[] = []
+    if (busyInfo.currentStepTitle) {
+      parts.push(`Step: ${busyInfo.currentStepTitle}`)
+    }
+
+    const elapsed = Math.floor((Date.now() - busyInfo.startedAt) / 1000)
+    const mins = Math.floor(elapsed / 60)
+    const secs = elapsed % 60
+    parts.push(`Running: ${mins}m ${secs}s`)
+
+    return parts.join(' | ')
+  }
+
+  private async handleSessionError(event: any): Promise<void> {
+    const chatId = this.stateManager.getChatIdForSession(event.sessionID)
+    if (!chatId) return
+
+    const errorName = event.error?.name || 'Error'
+    const errorMsg = stripAnsi(event.error?.message || 'Unknown error')
+
+    await this.bot.api.sendMessage(
+      chatId,
+      `⚠️ *${escapeMarkdown(errorName)}*\n${escapeMarkdown(errorMsg.substring(0, 300))}`,
+      { parse_mode: 'Markdown' }
+    ).catch(() => {})
+  }
+
+  private async handleSessionDiff(event: any): Promise<void> {
+    const chatId = this.stateManager.getChatIdForSession(event.sessionID)
+    if (!chatId) return
+
+    const diffs = event.diff || []
+    if (diffs.length === 0) return
+
+    let message = `📁 *File Changes (${diffs.length}):*\n\n`
+    for (const diff of diffs.slice(0, 10)) {
+      const statusIcon = diff.status === 'added' ? '🆕' : diff.status === 'deleted' ? '🗑️' : '📝'
+      message += `${statusIcon} \`${escapeMarkdown(diff.file)}\` (+${diff.additions || 0} -${diff.deletions || 0})\n`
+    }
+    if (diffs.length > 10) {
+      message += `_...and ${diffs.length - 10} more files_\n`
+    }
+
+    const chunks = splitMessage(message)
+    for (const chunk of chunks) {
+      await this.sendWithRateLimit(chatId, chunk, { parse_mode: 'Markdown' })
+    }
+  }
+
+  private async handleSessionUpdated(event: any): Promise<void> {
+    const chatId = this.stateManager.getChatIdForSession(event.sessionID)
+    if (!chatId) return
+
+    const info = event.info
+    if (!info) return
+
+    if (info.title) {
+      await this.sendWithRateLimit(
+        chatId,
+        `📝 *Session title:* ${escapeMarkdown(info.title)}`,
+        { parse_mode: 'Markdown' }
+      )
+    }
+
+    if (info.summary) {
+      const s = info.summary
+      if (s.additions || s.deletions) {
+        await this.sendWithRateLimit(
+          chatId,
+          `📊 Changes: +${s.additions || 0} -${s.deletions || 0} (${s.files || 0} files)`,
+          { parse_mode: 'Markdown' }
+        )
+      }
+    }
+  }
+
+  private async handleSessionCompacted(event: any): Promise<void> {
+    const chatId = this.stateManager.getChatIdForSession(event.sessionID)
+    if (!chatId) return
+
+    await this.sendWithRateLimit(
+      chatId,
+      '📦 *Context compacted* — older messages summarized to save space.',
+      { parse_mode: 'Markdown' }
+    )
+  }
+
+  private async handleQuestionAsked(event: any): Promise<void> {
+    const chatId = this.stateManager.getChatIdForSession(event.sessionID)
+    if (!chatId) return
+
+    const log = getLogger()
+    log.info('Question asked', { questionId: event.id, sessionID: event.sessionID })
+
+    const questionText = event.question || 'OpenCode has a question'
+    const options: string[] = event.options || []
+    const header = event.header || 'Question'
+
+    let message = `❓ *${escapeMarkdown(header)}*\n\n${escapeMarkdown(questionText)}`
+
+    if (options.length > 0) {
+      const inlineKeyboard = options.map((opt, idx) => [{
+        text: opt,
+        callback_data: `q:${event.id}:${idx}`,
+      }])
+
+      inlineKeyboard.push([{
+        text: '❌ Dismiss',
+        callback_data: `q:reject:${event.id}`,
+      }])
+
+      await this.bot.api.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: inlineKeyboard },
+      }).catch(error => {
+        log.error('Failed to send question', { error: (error as Error).message })
+      })
+    } else {
+      message += '\n\n_Reply to this message with your answer._'
+      await this.bot.api.sendMessage(chatId, message, { parse_mode: 'Markdown' }).catch(error => {
+        log.error('Failed to send question', { error: (error as Error).message })
+      })
+    }
+  }
+
+  private async handleTodoUpdated(event: any): Promise<void> {
+    const chatId = this.stateManager.getChatIdForSession(event.sessionID)
+    if (!chatId) return
+
+    const todos: TodoItem[] = event.todos || []
+    if (todos.length === 0) return
+
+    await this.sendTodoUpdate(chatId, todos)
+  }
+
+  private async handleUpdateAvailable(event: any): Promise<void> {
+    const chatIds = this.stateManager.getAllChatIds()
+    for (const chatId of chatIds) {
+      await this.sendWithRateLimit(
+        chatId,
+        `🔔 *Update Available*: OpenCode \`${escapeMarkdown(event.version || 'new version')}\` is available!`,
+        { parse_mode: 'Markdown' }
+      )
+    }
+  }
+
+  private getToolIcon(tool: string): string {
+    const icons: Record<string, string> = {
+      bash: '🖥️', edit: '✏️', write: '📝', read: '📖',
+      grep: '🔍', glob: '🔍', todowrite: '📋', websearch: '🌐',
+    }
+    return icons[tool] || '🔧'
+  }
+
+  private formatToolName(tool: string): string {
+    const toolNames: Record<string, string> = {
+      bash: 'Bash', edit: 'Edit', write: 'Write', read: 'Read',
+      grep: 'Grep', glob: 'Glob', todowrite: 'Todo', websearch: 'Search',
+    }
+    return toolNames[tool] || tool.charAt(0).toUpperCase() + tool.slice(1)
+  }
 }

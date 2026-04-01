@@ -2,51 +2,23 @@ import { Bot } from 'grammy'
 import { StateManager } from '../state/manager.js'
 import { OpenCodeClient, Model, Provider } from '../opencode/client.js'
 import { EventProcessor } from '../opencode/events.js'
-import { MessageQueue } from './queue.js'
 import { escapeMarkdown, splitMessage } from '../utils/formatter.js'
 import { getLogger } from '../utils/logger.js'
-
-// Shared help text for /start and /help commands
-const HELP_TEXT =
-  '*OpenCode Telegram Bot*\n\n' +
-  '*Session Commands:*\n' +
-  '/session - Create new session\n' +
-  '/session <id> - Select existing session\n' +
-  '/sessions - List recent sessions\n' +
-  '/continue - Continue old session (interactive)\n' +
-  '/status - Show current status\n' +
-  '/abort - Stop running task\n' +
-  '/delete - Delete current session\n' +
-  '/reset - Reset status\n\n' +
-  '*Model Commands:*\n' +
-  '/providers - List AI providers\n' +
-  '/models <provider> - List models for provider\n' +
-  '/model <provider> <model> - Select model\n\n' +
-  '*Mode Commands:*\n' +
-  '/mode <name> - Select mode (e.g. build/plan)\n\n' +
-  '*File Commands:*\n' +
-  '/files [path] - List files in directory\n' +
-  '/file <path> - View file content\n' +
-  '/find <pattern> - Search code\n\n' +
-  '*Info Commands:*\n' +
-  '/cost - Show cost tracking\n' +
-  '/todo - Show task list\n' +
-  '/diff - Show file changes\n\n' +
-  '*Usage:*\n' +
-  'Just send any message to prompt OpenCode!'
 
 export function registerCommands(
   bot: Bot,
   stateManager: StateManager,
   client: OpenCodeClient,
-  authorizedUserId: string,
-  eventProcessor: EventProcessor,
-  messageQueue: MessageQueue
+  eventProcessor?: EventProcessor
 ) {
   const log = getLogger()
 
+  // Caches
+  const modelsCache = new Map<number, Model[]>()
+  const providersCache = new Map<number, Provider[]>()
+
   // Helper to check authorization
-  const isAuthorized = (userId?: string) => userId === authorizedUserId
+  const isAuthorized = (userId?: string) => userId === process.env.AUTHORIZED_USER_ID
 
   // Start command
   bot.command('start', async (ctx) => {
@@ -55,7 +27,34 @@ export function registerCommands(
       return
     }
 
-    await ctx.reply(HELP_TEXT, { parse_mode: 'Markdown' })
+    await ctx.reply(
+      '*Welcome to OpenCode Telegram Bot!*\n\n' +
+      '*Session Commands:*\n' +
+      '/session - Create new session\n' +
+      '/sessions - List recent sessions\n' +
+      '/continue - Continue an old session\n' +
+      '/status - Show current session\n' +
+      '/abort - Stop running task\n' +
+      '/clear - Clear current session\n\n' +
+      '*Model Commands:*\n' +
+      '/providers - List AI providers\n' +
+      '/models <provider> - List models for provider\n' +
+      '/model - Show/select current model\n\n' +
+      '*Mode Commands:*\n' +
+      '/mode - Select mode (build/plan)\n' +
+      '/modes - List available modes\n\n' +
+      '*File Commands:*\n' +
+      '/files - List project files\n' +
+      '/file <path> - View file content\n' +
+      '/find <pattern> - Search code\n\n' +
+      '*Info Commands:*\n' +
+      '/cost - Show cost tracking\n' +
+      '/todo - Show task list\n' +
+      '/diff - Show file changes\n\n' +
+      'Just send any message to prompt OpenCode!\n' +
+      '_Multiple messages are queued automatically._',
+      { parse_mode: 'Markdown' }
+    )
   })
 
   // Session command
@@ -72,8 +71,6 @@ export function registerCommands(
       try {
         const session = await client.getSession(args)
         stateManager.setCurrentSession(ctx.chat.id, session.id)
-        eventProcessor.resetTracking(session.id)
-        eventProcessor.trackSession(session.id, ctx.chat.id)
         await ctx.reply(`Selected session: \`${escapeMarkdown(session.id)}\``, {
           parse_mode: 'Markdown',
         })
@@ -84,8 +81,6 @@ export function registerCommands(
       try {
         const session = await client.createSession()
         stateManager.setCurrentSession(ctx.chat.id, session.id)
-        eventProcessor.resetTracking(session.id)
-        eventProcessor.trackSession(session.id, ctx.chat.id)
         await ctx.reply(`Created new session: \`${escapeMarkdown(session.id)}\`\n\nSend any message to start!`, {
           parse_mode: 'Markdown',
         })
@@ -172,51 +167,10 @@ export function registerCommands(
 
     try {
       await client.abortSession(sessionId)
-      eventProcessor.resetTracking(sessionId)
-      await ctx.reply('🛑 Session aborted and relay state reset.')
+      await ctx.reply('🛑 Session aborted.')
     } catch (error) {
       await ctx.reply(`Failed to abort: ${(error as Error).message}`)
     }
-  })
-
-  // Delete command
-  bot.command('delete', async (ctx) => {
-    if (!isAuthorized(ctx.from?.id.toString())) {
-      await ctx.reply('You are not authorized to use this bot.')
-      return
-    }
-
-    log.info('User command', { command: '/delete', userId: ctx.from?.id })
-
-    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
-    if (!sessionId) {
-      await ctx.reply('No session selected.')
-      return
-    }
-
-    try {
-      await client.deleteSession(sessionId)
-      eventProcessor.resetTracking(sessionId)
-      stateManager.clearChatState(ctx.chat.id)
-      await ctx.reply(`🗑️ Session \`${escapeMarkdown(sessionId)}\` deleted.`, { parse_mode: 'Markdown' })
-    } catch (error) {
-      await ctx.reply(`Failed to delete: ${(error as Error).message}`)
-    }
-  })
-
-  // Reset command
-  bot.command('reset', async (ctx) => {
-    if (!isAuthorized(ctx.from?.id.toString())) {
-      await ctx.reply('You are not authorized to use this bot.')
-      return
-    }
-
-    log.info('User command', { command: '/reset', userId: ctx.from?.id })
-    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
-    if (sessionId) {
-      eventProcessor.resetTracking(sessionId)
-    }
-    await ctx.reply('🧹 Relay tracking state reset.')
   })
 
   // Clear command
@@ -228,11 +182,6 @@ export function registerCommands(
 
     log.info('User command', { command: '/clear', userId: ctx.from?.id })
 
-    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
-    if (sessionId) {
-      eventProcessor.resetTracking(sessionId)
-    }
-    messageQueue.clear(ctx.chat.id)
     stateManager.clearChatState(ctx.chat.id)
     await ctx.reply('Cleared current session, model, and mode settings.')
   })
@@ -275,13 +224,31 @@ export function registerCommands(
       message += `*Model:*\n`
       message += `${escapeMarkdown(chatState.model.providerId)}/${escapeMarkdown(chatState.model.modelId)}\n\n`
     } else {
-      message += `*Model:* (OpenCode default)\n\n`
+      try {
+        const status = await client.getSessionStatus(chatState.sessionId || '')
+        if (status?.model) {
+          message += `*Model:* ${escapeMarkdown(status.model)} (from session)\n\n`
+        } else {
+          message += `*Model:* Default (OpenCode configured default)\n\n`
+        }
+      } catch {
+        message += `*Model:* Default (OpenCode configured default)\n\n`
+      }
     }
 
     if (chatState.mode) {
       message += `*Mode:* \`${escapeMarkdown(chatState.mode)}\`\n`
     } else {
-      message += `*Mode:* (OpenCode default)\n`
+      try {
+        const status = await client.getSessionStatus(chatState.sessionId || '')
+        if (status?.agent) {
+          message += `*Mode:* \`${escapeMarkdown(status.agent)}\` (from session)\n`
+        } else {
+          message += `*Mode:* Default (OpenCode configured default)\n`
+        }
+      } catch {
+        message += `*Mode:* Default (OpenCode configured default)\n`
+      }
     }
 
     if (chatState.sessionId) {
@@ -328,6 +295,8 @@ export function registerCommands(
     message += `  Input: ${cost.totalInput.toLocaleString()}\n`
     message += `  Output: ${cost.totalOutput.toLocaleString()}\n`
     message += `  Reasoning: ${cost.totalReasoning.toLocaleString()}\n`
+    message += `  Cache Read: ${cost.totalCacheRead.toLocaleString()}\n`
+    message += `  Cache Write: ${cost.totalCacheWrite.toLocaleString()}\n`
 
     await ctx.reply(message, { parse_mode: 'Markdown' })
   })
@@ -415,12 +384,6 @@ export function registerCommands(
 
     const dirPath = (ctx.match as string || '').trim() || undefined
 
-    // Basic path traversal prevention
-    if (dirPath && dirPath.includes('..')) {
-      await ctx.reply('❌ Path traversal not allowed. Use absolute paths or stay within project.')
-      return
-    }
-
     try {
       const result = await client.listFiles(dirPath)
       const entries = result.entries || []
@@ -459,12 +422,6 @@ export function registerCommands(
 
     if (!filePath) {
       await ctx.reply('Usage: `/file <path>`\nExample: `/file src/index.ts`', { parse_mode: 'Markdown' })
-      return
-    }
-
-    // Basic path traversal prevention
-    if (filePath.includes('..')) {
-      await ctx.reply('❌ Path traversal not allowed. Use absolute paths or stay within project.')
       return
     }
 
@@ -540,7 +497,7 @@ export function registerCommands(
     }
   })
 
-  // Providers command
+  // Providers command - list providers first
   bot.command('providers', async (ctx) => {
     if (!isAuthorized(ctx.from?.id.toString())) {
       await ctx.reply('You are not authorized to use this bot.')
@@ -557,6 +514,8 @@ export function registerCommands(
         return
       }
 
+      providersCache.set(ctx.chat.id, providers)
+
       let message = '*Available Providers:*\n\n'
       for (let i = 0; i < providers.length; i++) {
         const p = providers[i]
@@ -564,6 +523,7 @@ export function registerCommands(
         message += `${i + 1}. \`${escapeMarkdown(p.id)}\` (${modelCount} models)\n`
       }
       message += '\nUse `/models <provider>` to see models for a provider.'
+      message += '\nExample: `/models ' + escapeMarkdown(providers[0].id) + '`'
 
       await ctx.reply(message, { parse_mode: 'Markdown' })
     } catch (error) {
@@ -571,7 +531,7 @@ export function registerCommands(
     }
   })
 
-  // Models command
+  // Models command - now shows models for a specific provider
   bot.command('models', async (ctx) => {
     if (!isAuthorized(ctx.from?.id.toString())) {
       await ctx.reply('You are not authorized to use this bot.')
@@ -583,10 +543,34 @@ export function registerCommands(
     log.info('User command', { command: '/models', args: providerFilter, userId: ctx.from?.id })
 
     if (!providerFilter) {
-      await ctx.reply('Usage: `/models <provider>`\nExample: `/models anthropic`', { parse_mode: 'Markdown' })
+      // No provider specified, show providers
+      try {
+        const providers = await client.listProviders()
+
+        if (providers.length === 0) {
+          await ctx.reply('No providers configured. Check your OpenCode settings.')
+          return
+        }
+
+        providersCache.set(ctx.chat.id, providers)
+
+        let message = '*Available Providers:*\n\n'
+        for (let i = 0; i < providers.length; i++) {
+          const p = providers[i]
+          const modelCount = Object.keys(p.models || {}).length
+          message += `${i + 1}. \`${escapeMarkdown(p.id)}\` (${modelCount} models)\n`
+        }
+        message += '\nUse `/models <provider>` to see models.'
+        message += '\nExample: `/models ' + escapeMarkdown(providers[0].id) + '`'
+
+        await ctx.reply(message, { parse_mode: 'Markdown' })
+      } catch (error) {
+        await ctx.reply(`Failed to list providers: ${(error as Error).message}`)
+      }
       return
     }
 
+    // Provider specified, show models for that provider
     try {
       const models = await client.listModels(providerFilter)
 
@@ -596,6 +580,8 @@ export function registerCommands(
         })
         return
       }
+
+      modelsCache.set(ctx.chat.id, models)
 
       let message = `*Models for* \`${escapeMarkdown(providerFilter)}\`:\n\n`
       for (let i = 0; i < models.length; i++) {
@@ -671,6 +657,58 @@ export function registerCommands(
     )
   })
 
+  // Modes command
+  bot.command('modes', async (ctx) => {
+    if (!isAuthorized(ctx.from?.id.toString())) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    log.info('User command', { command: '/modes', userId: ctx.from?.id })
+
+    try {
+      const agents = await client.listAgents()
+
+      if (agents.length === 0) {
+        await ctx.reply(
+          '*Available Modes:*\n\n' +
+          '• `build` - Code implementation mode\n' +
+          '• `plan` - Planning and design mode\n' +
+          '• `code` - Alternative coding mode\n' +
+          '• `review` - Code review mode\n' +
+          '• `debug` - Debugging mode\n\n' +
+          'Use `/mode <name>` to select.',
+          { parse_mode: 'Markdown' }
+        )
+        return
+      }
+
+      let message = '*Available Modes:*\n\n'
+      for (let i = 0; i < agents.length; i++) {
+        const agent = agents[i]
+        message += `${i + 1}. \`${escapeMarkdown(agent.name)}\``
+        if (agent.description) {
+          message += ` - ${escapeMarkdown(agent.description)}`
+        }
+        message += '\n'
+      }
+      message += '\nUse `/mode <name>` to select.'
+
+      await ctx.reply(message, { parse_mode: 'Markdown' })
+    } catch {
+      await ctx.reply(
+        '*Available Modes:*\n\n' +
+        '• `build` - Code implementation mode\n' +
+        '• `plan` - Planning and design mode\n' +
+        '• `code` - Alternative coding mode\n' +
+        '• `review` - Code review mode\n' +
+        '• `debug` - Debugging mode\n\n' +
+        'Use `/mode <name>` to select.',
+        { parse_mode: 'Markdown' }
+      )
+    }
+  })
+
   // Mode command
   bot.command('mode', async (ctx) => {
     if (!isAuthorized(ctx.from?.id.toString())) {
@@ -693,11 +731,22 @@ export function registerCommands(
       }
 
       message += '*Usage:* `/mode <name>`\n\n'
-      message += 'Common modes:\n'
+      message += 'Allowed modes:\n'
       message += '• `build` - Code implementation\n'
-      message += '• `plan` - Planning and design'
+      message += '• `plan` - Planning and design\n\n'
+      message += 'Use `/modes` to see all available.'
 
       await ctx.reply(message, { parse_mode: 'Markdown' })
+      return
+    }
+
+    if (args !== 'build' && args !== 'plan') {
+      await ctx.reply(
+        `❌ Invalid mode: \`${escapeMarkdown(args)}\`\n\n` +
+        'Only `build` and `plan` modes are allowed.\n' +
+        'Use `/mode build` or `/mode plan`.',
+        { parse_mode: 'Markdown' }
+      )
       return
     }
 
@@ -709,6 +758,70 @@ export function registerCommands(
     )
   })
 
+  // Working command
+  bot.command('working', async (ctx) => {
+    if (!isAuthorized(ctx.from?.id.toString())) {
+      await ctx.reply('You are not authorized to use this bot.')
+      return
+    }
+
+    log.info('User command', { command: '/working', userId: ctx.from?.id })
+
+    const sessionId = stateManager.getCurrentSession(ctx.chat.id)
+    if (!sessionId) {
+      await ctx.reply('No session selected.')
+      return
+    }
+
+    if (eventProcessor) {
+      const status = eventProcessor.getWorkingStatus(sessionId)
+      if (status) {
+        await ctx.reply(`🔧 *Currently working:*\n${escapeMarkdown(status)}`, { parse_mode: 'Markdown' })
+        return
+      }
+    }
+
+    try {
+      const sessionStatus = await client.getSessionStatus(sessionId)
+      const isBusy = sessionStatus?.status === 'busy'
+
+      if (isBusy) {
+        await ctx.reply('🔧 OpenCode is working... (checking details)')
+        try {
+          const todos = await client.getSessionTodo(sessionId)
+          const inProgress = todos.filter(t => t.status === 'in_progress')
+          const pending = todos.filter(t => t.status === 'pending')
+
+          let message = '🔧 *Working on:*\n\n'
+          if (inProgress.length > 0) {
+            message += '*In Progress:*\n'
+            for (const t of inProgress) {
+              message += `🔄 ${escapeMarkdown(t.content)}\n`
+            }
+            message += '\n'
+          }
+          if (pending.length > 0) {
+            message += '*Up Next:*\n'
+            for (const t of pending.slice(0, 5)) {
+              message += `⬜ ${escapeMarkdown(t.content)}\n`
+            }
+          }
+          if (inProgress.length === 0 && pending.length === 0) {
+            message += 'No tasks in todo list. OpenCode may be planning or thinking.'
+          }
+
+          await ctx.reply(message, { parse_mode: 'Markdown' })
+        } catch {
+          await ctx.reply('🔧 OpenCode is working but could not fetch details.')
+        }
+      } else {
+        await ctx.reply('✅ OpenCode is idle. No active work.')
+      }
+    } catch {
+      await ctx.reply('Could not check session status.')
+    }
+  })
+
   // Help command
   bot.command('help', async (ctx) => {
     if (!isAuthorized(ctx.from?.id.toString())) {
@@ -718,6 +831,47 @@ export function registerCommands(
 
     log.info('User command', { command: '/help', userId: ctx.from?.id })
 
-    await ctx.reply(HELP_TEXT, { parse_mode: 'Markdown' })
+    await ctx.reply(
+      '*OpenCode Telegram Bot Help*\n\n' +
+      '*Session Commands:*\n' +
+      '/session - Create new session\n' +
+      '/session <id> - Select existing session\n' +
+      '/sessions - List recent sessions\n' +
+      '/continue - Continue old session (interactive)\n' +
+      '/status - Show current status\n' +
+      '/working - Show what OpenCode is doing now\n' +
+      '/abort - Stop running session\n' +
+      '/clear - Clear current settings\n\n' +
+      '*Model Commands:*\n' +
+      '/providers - List AI providers\n' +
+      '/models <provider> - List models for provider\n' +
+      '/model - Show current model\n' +
+      '/model <provider> <model> - Select model\n\n' +
+      '*Mode Commands:*\n' +
+      '/mode - Show current mode\n' +
+      '/mode <name> - Select mode\n' +
+      '/modes - List available modes\n\n' +
+      '*File Commands:*\n' +
+      '/files [path] - List files in directory\n' +
+      '/file <path> - View file content\n' +
+      '/find <pattern> - Search code\n\n' +
+      '*Info Commands:*\n' +
+      '/cost - Show cost tracking\n' +
+      '/todo - Show task list\n' +
+      '/diff - Show file changes\n' +
+      '/working - Show current working task\n\n' +
+      '*Usage:*\n' +
+      'Just send any message to prompt OpenCode!\n' +
+      'Multiple messages are queued and processed in order.\n\n' +
+      '*Tips:*\n' +
+      '• Use `/providers` then `/models <provider>` to browse\n' +
+      '• Use `/mode plan` for planning\n' +
+      '• Use `/mode build` for coding\n' +
+      '• Use `/abort` to stop a running task\n' +
+      '• Use `/working` to check what OpenCode is doing\n' +
+      '• Use `/todo` to see the task list\n' +
+      '• Send multiple messages — they queue automatically',
+      { parse_mode: 'Markdown' }
+    )
   })
 }
