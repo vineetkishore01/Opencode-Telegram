@@ -22,9 +22,10 @@ export function registerHandlers(
       if (!ctx.from) return
       const userId = ctx.from.id.toString()
       const text = ctx.message.text
-      log.info('Incoming message', { userId, chatId: ctx.chat.id, text })
+      log.info('Incoming message', { userId, chatId: ctx.chat.id, text: text.substring(0, 100) })
 
       if (userId !== authorizedUserId) {
+        log.warn('Unauthorized access attempt', { userId, chatId: ctx.chat.id })
         await ctx.reply('You are not authorized to use this bot.')
         return
       }
@@ -110,9 +111,10 @@ export function registerHandlers(
     }
     const userId = ctx.from.id.toString()
     const data = ctx.callbackQuery.data
-    log.info('Incoming callback', { userId, chatId: ctx.chat?.id, data })
+    log.info('Incoming callback', { userId, chatId: ctx.chat?.id, data: data.substring(0, 50) })
 
     if (userId !== authorizedUserId) {
+      log.warn('Unauthorized callback attempt', { userId, data: data.substring(0, 50) })
       await ctx.answerCallbackQuery('Not authorized')
       return
     }

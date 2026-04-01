@@ -33,7 +33,7 @@ const SavedStateSchema = z.object({
     chatId: z.number(),
     text: z.string(),
   })).optional(),
-}).passthrough()
+}).strip()
 
 export interface CostEntry {
   totalCost: number

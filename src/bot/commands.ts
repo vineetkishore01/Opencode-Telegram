@@ -415,6 +415,12 @@ export function registerCommands(
 
     const dirPath = (ctx.match as string || '').trim() || undefined
 
+    // Basic path traversal prevention
+    if (dirPath && dirPath.includes('..')) {
+      await ctx.reply('❌ Path traversal not allowed. Use absolute paths or stay within project.')
+      return
+    }
+
     try {
       const result = await client.listFiles(dirPath)
       const entries = result.entries || []
@@ -453,6 +459,12 @@ export function registerCommands(
 
     if (!filePath) {
       await ctx.reply('Usage: `/file <path>`\nExample: `/file src/index.ts`', { parse_mode: 'Markdown' })
+      return
+    }
+
+    // Basic path traversal prevention
+    if (filePath.includes('..')) {
+      await ctx.reply('❌ Path traversal not allowed. Use absolute paths or stay within project.')
       return
     }
 
