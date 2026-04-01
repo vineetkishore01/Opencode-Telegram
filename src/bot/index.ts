@@ -8,6 +8,7 @@ import { MessageQueue } from './queue.js'
 import { registerCommands } from './commands.js'
 import { registerHandlers } from './handlers.js'
 import { BotConfig } from '../types/index.js'
+import { OpenCodeServer } from '../opencode/server.js'
 import { getLogger } from '../utils/logger.js'
 
 export class TelegramBot {
@@ -15,11 +16,11 @@ export class TelegramBot {
   private stateManager: StateManager
   private openCodeClient: OpenCodeClient
   private permissionHandler: PermissionHandler
-  private eventProcessor: EventProcessor
   private messageQueue: MessageQueue
+  private eventProcessor: EventProcessor
   private authorizedUserId: string
 
-  constructor(private config: BotConfig) {
+  constructor(private config: BotConfig, private openCodeServer?: OpenCodeServer | null) {
     this.bot = new Bot(config.telegramToken)
     this.bot.api.config.use(autoRetry())
 
@@ -30,8 +31,8 @@ export class TelegramBot {
       : undefined
 
     this.openCodeClient = new OpenCodeClient(config.openCodeUrl, auth)
-    this.messageQueue = new MessageQueue(this.stateManager)
     this.permissionHandler = new PermissionHandler(this.openCodeClient, this.bot, this.stateManager)
+    this.messageQueue = new MessageQueue(this.stateManager)
     this.eventProcessor = new EventProcessor(this.openCodeClient, this.bot, this.stateManager, this.permissionHandler, this.messageQueue)
     this.authorizedUserId = config.authorizedUserId
 
@@ -39,8 +40,8 @@ export class TelegramBot {
   }
 
   private setup(): void {
-    registerCommands(this.bot, this.stateManager, this.openCodeClient, this.messageQueue, this.authorizedUserId, this.eventProcessor)
-    registerHandlers(this.bot, this.stateManager, this.openCodeClient, this.permissionHandler, this.eventProcessor, this.messageQueue, this.authorizedUserId)
+    registerCommands(this.bot, this.stateManager, this.openCodeClient, this.authorizedUserId, this.eventProcessor, this.messageQueue)
+    registerHandlers(this.bot, this.stateManager, this.openCodeClient, this.authorizedUserId, this.permissionHandler, this.eventProcessor, this.messageQueue)
   }
 
   async start(): Promise<void> {
@@ -49,7 +50,7 @@ export class TelegramBot {
     // Load state
     await this.stateManager.load()
 
-    // Restore persisted queue
+    // Clear stale persisted queue messages from previous session
     this.messageQueue.loadPersisted()
 
     // Start event processor in background
@@ -64,7 +65,7 @@ export class TelegramBot {
         const msg = `✅ Telegram bot started as @${info.username}`
         log.info(msg)
         console.log(msg)
-        
+
         // Send startup notification to authorized user
         try {
           await this.bot.api.sendMessage(this.authorizedUserId, '🚀 OpenCode is Online 🔥')

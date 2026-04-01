@@ -10,10 +10,10 @@ export function registerHandlers(
   bot: Bot,
   stateManager: StateManager,
   client: OpenCodeClient,
+  authorizedUserId: string,
   permissionHandler: PermissionHandler,
   eventProcessor: EventProcessor,
-  messageQueue: MessageQueue,
-  authorizedUserId: string
+  messageQueue: MessageQueue
 ) {
   const log = getLogger()
 
@@ -42,47 +42,61 @@ export function registerHandlers(
         return
       }
 
-      // If session is busy, queue the message
-      if (eventProcessor.isSessionWorking(sessionId)) {
-        messageQueue.enqueue(ctx.chat.id, text)
-        messageQueue.setBusy(ctx.chat.id)
-        const position = messageQueue.getQueueLength(ctx.chat.id)
-        log.info('Message queued', { sessionId, position })
-        await ctx.reply(`📋 Queued (position ${position}). Will process when current task finishes.`)
+      // Register session for event tracking if not already tracked
+      eventProcessor.trackSession(sessionId, ctx.chat.id)
+
+      // Atomically check if session is working and queue if needed
+      if (eventProcessor.isSessionWorking(sessionId) || messageQueue.isBusy(ctx.chat.id)) {
+        // Queue the message atomically (prevents race condition)
+        const wasQueued = messageQueue.tryEnqueueAndSetBusy(ctx.chat.id, text)
+        if (wasQueued) {
+          const position = messageQueue.getQueueLength(ctx.chat.id)
+          log.info('Message queued', { sessionId, position })
+          await ctx.reply(`📋 Queued (position ${position}). Will process when current task finishes.`)
+        } else {
+          log.debug('Duplicate message ignored', { sessionId })
+        }
         return
       }
 
       // Send working message
       const workingMsg = await ctx.reply('⏳ OpenCode is working...').catch(() => null)
 
-      // Create tracker BEFORE sending to prevent initSession race
-      eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, workingMsg?.message_id || 0)
+      // Create tracker BEFORE sending to prevent race conditions
+      // Use messageId 0 as sentinel if working message failed to send
+      const workingMessageId = workingMsg?.message_id || 0
+      eventProcessor.setWorkingMessage(sessionId, ctx.chat.id, workingMessageId)
+      if (workingMsg) {
+        log.debug('Working message set', { sessionId, messageId: workingMsg.message_id })
+      } else {
+        log.warn('Failed to send working message, using sentinel', { sessionId })
+      }
+
       messageQueue.setBusy(ctx.chat.id)
 
-      // Send message to OpenCode (fire-and-forget to avoid blocking poll loop)
       const model = stateManager.getCurrentModel(ctx.chat.id)
       const mode = stateManager.getCurrentMode(ctx.chat.id)
 
+      log.info('Relaying to OpenCode', { sessionId, text: text.substring(0, 50) })
+
+      // Fire-and-forget to avoid blocking handler
       client.sendAsyncMessage(sessionId, text, {
         providerId: model?.providerId,
         modelId: model?.modelId,
         agent: mode,
       }).catch((error: Error) => {
-        log.error('Failed to send to OpenCode', { error: error.message })
+        log.error('Failed to relay to OpenCode', { error: error.message })
         messageQueue.setIdle(ctx.chat.id)
         ctx.reply(`❌ Error: ${error.message.substring(0, 500)}`).catch(() => {})
       })
 
-      const count = stateManager.incrementPromptCount(ctx.chat.id)
-      if (count > 0 && count % 10 === 0) {
-        await ctx.reply(`📊 You've sent ${count} prompts. Use /cost to check spending.`)
-      }
-
-      log.info('Sent to OpenCode', { sessionId })
+      stateManager.incrementPromptCount(ctx.chat.id)
     } catch (error) {
       log.error('Handler error', { error: (error as Error).message })
       const sessionId = stateManager.getCurrentSession(ctx.chat.id)
-      if (sessionId) eventProcessor.markSessionIdle(sessionId)
+      if (sessionId) {
+        eventProcessor.markSessionIdle(sessionId)
+      }
       messageQueue.setIdle(ctx.chat.id)
       ctx.reply(`❌ Error: ${(error as Error).message.substring(0, 500)}`).catch(() => {})
     }
@@ -159,10 +173,6 @@ export function registerHandlers(
 
       await ctx.answerCallbackQuery('Session selected')
       await ctx.editMessageText(`✅ Session selected: \`${sessionId}\``, { parse_mode: 'Markdown' }).catch(() => {})
-      return
-    }
-
-    if (data.startsWith('models_page:')) {
       return
     }
 

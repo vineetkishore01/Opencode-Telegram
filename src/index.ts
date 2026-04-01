@@ -2,13 +2,10 @@
 import { config } from 'dotenv'
 import { parseArgs } from 'util'
 import { resolve } from 'path'
-import { existsSync } from 'fs'
-import { spawnSync } from 'child_process'
-import { createInterface } from 'readline'
 import { TelegramBot } from './bot/index.js'
+import { OpenCodeServer } from './opencode/server.js'
 import { loadConfig, validateConfig, hasCredentials, saveProjectConfig, removeProjectConfig, projectConfigExists } from './utils/config.js'
 import { initLogger, getLogger } from './utils/logger.js'
-import { OpenCodeServer } from './opencode/server.js'
 
 // Load environment variables
 config()
@@ -27,8 +24,9 @@ const { values } = parseArgs({
     'no-server': {
       type: 'boolean',
     },
-    check: {
+    tunnel: {
       type: 'boolean',
+      description: 'Enable Cloudflare tunnel (default: disabled, local-only)',
     },
     uninstall: {
       type: 'boolean',
@@ -55,43 +53,23 @@ Usage:
 Options:
   -d, --directory <path>  Project directory (default: current directory)
   -p, --port <port>       OpenCode server port (default: 4097)
-  --no-server             Don't start OpenCode server (connect to existing)
-  --check                 Verify OpenCode installation
+  --no-server             Don't start OpenCode, connect to existing server
+  --tunnel                Enable Cloudflare tunnel (default: disabled, local-only)
   --uninstall             Remove project configuration
   -h, --help              Show this help
 
 Examples:
-  opencode-tele                      # Start in current directory
+  opencode-tele                      # Start OpenCode + bot (local-only, no tunnel)
   opencode-tele -d /path/to/project  # Start in specific directory
   opencode-tele -p 5000              # Use different port
-  opencode-tele --no-server          # Connect to existing server
-  opencode-tele --check              # Verify OpenCode is installed
+  opencode-tele --tunnel             # Enable Cloudflare tunnel for remote access
+  opencode-tele --no-server          # Connect to existing OpenCode server
   opencode-tele --uninstall          # Remove this project's config
+
+Security: By default, the bot runs in local-only mode with no remote exposure.
+Use --tunnel only if you need remote access and understand the security implications.
 `)
   process.exit(0)
-}
-
-function checkOpenCode(): boolean {
-  try {
-    const result = spawnSync('opencode', ['--version'], { stdio: 'pipe' })
-    return result.status === 0
-  } catch {
-    return false
-  }
-}
-
-async function promptInput(question: string): Promise<string> {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  })
-
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close()
-      resolve(answer.trim())
-    })
-  })
 }
 
 async function runSetup(projectDir: string): Promise<boolean> {
@@ -101,10 +79,25 @@ async function runSetup(projectDir: string): Promise<boolean> {
   console.log('  2. Send /newbot and follow the instructions')
   console.log('  3. Copy the bot token\n')
 
+  const readline = await import('readline')
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  })
+
+  const promptInput = (question: string): Promise<string> => {
+    return new Promise((resolve) => {
+      rl.question(question, (answer) => {
+        resolve(answer.trim())
+      })
+    })
+  }
+
   const telegramToken = await promptInput('Enter your Telegram bot token: ')
 
   if (!telegramToken) {
     console.error('❌ Bot token is required.')
+    rl.close()
     return false
   }
 
@@ -116,8 +109,11 @@ async function runSetup(projectDir: string): Promise<boolean> {
 
   if (!authorizedUserId) {
     console.error('❌ User ID is required.')
+    rl.close()
     return false
   }
+
+  rl.close()
 
   saveProjectConfig(projectDir, {
     telegramToken,
@@ -131,29 +127,7 @@ async function runSetup(projectDir: string): Promise<boolean> {
 
 async function main() {
   const projectDir = resolve(directory)
-
-  // Validate project directory
-  if (!existsSync(projectDir)) {
-    console.error(`Error: Directory does not exist: ${projectDir}`)
-    process.exit(1)
-  }
-
-  // Handle --check
-  if (values.check) {
-    if (!checkOpenCode()) {
-      console.log('\n❌ OpenCode is not installed.')
-      console.log('\nInstall with:')
-      console.log('  npm install -g opencode-ai\n')
-      process.exit(1)
-    }
-    console.log('✅ OpenCode is installed and ready.')
-    if (projectConfigExists(projectDir)) {
-      console.log('✅ Project configuration found.')
-    } else {
-      console.log('ℹ️  No project configuration yet (will prompt on first run).')
-    }
-    process.exit(0)
-  }
+  const startServer = !values['no-server']
 
   // Handle --uninstall
   if (values.uninstall) {
@@ -165,7 +139,7 @@ async function main() {
     }
 
     const binaryPath = '/usr/local/bin/opencode-tele'
-    if (existsSync(binaryPath)) {
+    if (require('fs').existsSync(binaryPath)) {
       console.log(`\nTo completely remove the global binary, run:\n  sudo rm -f ${binaryPath}`)
       uninstalled = true
     }
@@ -178,14 +152,6 @@ async function main() {
     process.exit(0)
   }
 
-  // Check OpenCode is installed
-  if (!checkOpenCode()) {
-    console.error('\n❌ OpenCode is not installed.')
-    console.error('\nInstall with:')
-    console.error('  npm install -g opencode-ai\n')
-    process.exit(1)
-  }
-
   // Auto-detect: if no credentials found for this project, run setup inline
   if (!hasCredentials(projectDir)) {
     const success = await runSetup(projectDir)
@@ -194,12 +160,12 @@ async function main() {
     }
   }
 
-  const portNum = parseInt(port, 10)
-  const startServer = !values['no-server']
-
   // Load and validate configuration
   const botConfig = loadConfig(projectDir)
   validateConfig(botConfig)
+
+  // Set OpenCode URL
+  botConfig.openCodeUrl = `http://127.0.0.1:${values.port}`
 
   // Initialize logger
   const logger = initLogger(botConfig)
@@ -208,39 +174,57 @@ async function main() {
 
   let openCodeServer: OpenCodeServer | null = null
 
-  // Start OpenCode server if needed
+  // Start OpenCode server if requested
   if (startServer) {
     console.log('⏳ Starting OpenCode server...')
-    openCodeServer = new OpenCodeServer(projectDir, portNum)
+    const serverPort = parseInt(values.port || '4097', 10)
+    const enableTunnel = !!values.tunnel
+    
+    if (enableTunnel) {
+      console.log('⚠️  Cloudflare tunnel enabled - server will be publicly accessible')
+    } else {
+      console.log('🔒 Local-only mode - no remote access')
+    }
+    
+    openCodeServer = new OpenCodeServer(projectDir, serverPort)
 
     try {
-      await openCodeServer.start()
+      await openCodeServer.start(enableTunnel)
       const actualPort = openCodeServer.getPort()
       console.log(`✅ OpenCode server started on port ${actualPort}`)
       botConfig.openCodeUrl = `http://127.0.0.1:${actualPort}`
     } catch (error) {
       console.error(`❌ Failed to start OpenCode server: ${(error as Error).message}`)
+      logger.error('Failed to start OpenCode server', { error: (error as Error).message })
       process.exit(1)
     }
   }
 
   // Create and start bot
   console.log('🚀 Starting Telegram bot...')
-  const bot = new TelegramBot(botConfig)
+  console.log(`📡 Connecting to OpenCode at ${botConfig.openCodeUrl}`)
+  const bot = new TelegramBot(botConfig, openCodeServer)
 
-  // Handle graceful shutdown — guard against re-entrant calls
+  // Handle graceful shutdown
   let shuttingDown = false
   const shutdown = async () => {
     if (shuttingDown) return
     shuttingDown = true
     logger.info('Shutting down...')
 
+    console.log('\n🔴 Stopping services...')
+
+    // Stop OpenCode server first
     if (openCodeServer) {
       await openCodeServer.stop()
     }
 
+    // Stop bot (sends shutdown notification)
     await bot.stop()
+
     logger.close()
+    
+    console.log('✅ Goodbye!')
     process.exit(0)
   }
 
@@ -251,11 +235,11 @@ async function main() {
     await bot.start()
   } catch (error) {
     logger.error('Failed to start bot', { error: (error as Error).message })
-
+    
     if (openCodeServer) {
       await openCodeServer.stop()
     }
-
+    
     process.exit(1)
   }
 }

@@ -1,31 +1,27 @@
 # OpenCode Telegram Bot
 
-Control your [OpenCode](https://github.com/opencode-ai/opencode) server from anywhere using Telegram. This bot allows you to prompt OpenCode, manage sessions, browse files, approve permissions, and monitor task execution directly from your phone or desktop.
+Control your [OpenCode](https://github.com/opencode-ai/opencode) server from Telegram. This bot acts as a relay between Telegram and your local OpenCode server, allowing you to prompt OpenCode, manage sessions, approve permissions, and monitor task execution directly from your phone or desktop.
 
 ## ✨ Features
 
-- **Remote Control**: Send prompts to OpenCode from Telegram
-- **Session Management**: Create, list, switch between sessions
-- **Real-time Updates**: Receive live notifications for:
-  - Reasoning/thinking process
-  - Tool execution (bash, edit, write, read, etc.)
-  - File edits and patches
-  - Task completion
-  - Token usage and costs
+- **Local-First**: Everything runs on your machine - no cloud, no tunnels, no remote exposure
+- **Real-time Updates**: SSE-based event streaming for instant notifications
+- **Session Management**: Create, list, switch between OpenCode sessions
 - **Permission Handling**: Approve/reject file access and tool execution requests
-- **Message Queueing**: Automatically queues multiple prompts when busy
-- **Model/Mode Selection**: Choose AI providers, models, and modes (build/plan/review/debug)
+- **Message Queueing**: Automatically queues multiple prompts when OpenCode is busy
+- **Model/Mode Selection**: Choose AI providers, models, and modes (build/plan/review)
 - **File Operations**: List files, view content, search code
-- **Parallel Projects**: Run multiple instances on different projects with auto port selection
+- **Cost Tracking**: Monitor token usage and costs per session
 
 ## 🚀 Quick Start
 
-### 1. Prerequisites
+### Prerequisites
+
 - [Node.js](https://nodejs.org/) (v18 or higher)
-- [OpenCode](https://github.com/opencode-ai/opencode) installed globally (`npm install -g opencode-ai`)
+- [OpenCode](https://github.com/opencode-ai/opencode) installed globally: `npm install -g opencode-ai`
 - A Telegram account
 
-### 2. Installation
+### Installation
 
 ```bash
 # Clone the repository
@@ -42,7 +38,7 @@ npm run build
 sudo npm install -g .
 ```
 
-### 3. First Run Setup
+### First Run
 
 Navigate to any project directory and run:
 
@@ -50,21 +46,26 @@ Navigate to any project directory and run:
 opencode-tele
 ```
 
-The bot will guide you through setting up:
+The bot will guide you through setup:
 
 1. **Telegram Bot Token**: Get from [@BotFather](https://t.me/botfather)
-   - Send `/newbot` to BotFather
-   - Follow instructions to create a bot
+   - Send `/newbot` and follow instructions
    - Copy the token
 
 2. **Your User ID**: Get from [@userinfobot](https://t.me/userinfobot)
    - Message @userinfobot on Telegram
-   - It will reply with your numeric user ID
+   - Copy your numeric user ID
 
-### 4. Verify Installation
+### What Happens on Startup
 
-```bash
-opencode-tele --check
+```
+⏳ Starting OpenCode server...
+✅ OpenCode server started on port 4097
+🚀 Starting Telegram bot...
+📡 Connecting to OpenCode at http://127.0.0.1:4097
+✅ Telegram bot started as @yourbot
+
+📱 You receive: "🚀 OpenCode is Online 🔥"
 ```
 
 ## 📖 Usage
@@ -72,10 +73,12 @@ opencode-tele --check
 ### Basic Commands
 
 ```bash
-opencode-tele                      # Start in current directory
+opencode-tele                      # Start OpenCode + bot (local-only, no tunnel)
 opencode-tele -d /path/to/project  # Start in specific directory
-opencode-tele -p 5000              # Use specific port
-opencode-tele --no-server          # Connect to existing server
+opencode-tele -p 5000              # Use different port
+opencode-tele --tunnel             # Enable Cloudflare tunnel for remote access
+opencode-tele --no-server          # Connect to existing OpenCode server
+opencode-tele --uninstall          # Remove project config
 ```
 
 ### Command-Line Options
@@ -83,9 +86,9 @@ opencode-tele --no-server          # Connect to existing server
 | Option | Description |
 |--------|-------------|
 | `-d, --directory <path>` | Project directory (default: current directory) |
-| `-p, --port <port>` | OpenCode server port (default: 4097, auto-selects if busy) |
-| `--no-server` | Don't start OpenCode server, connect to existing |
-| `--check` | Verify OpenCode installation |
+| `-p, --port <port>` | OpenCode server port (default: 4097) |
+| `--no-server` | Don't start OpenCode, connect to existing server |
+| `--tunnel` | **Enable Cloudflare tunnel** (default: disabled, local-only) |
 | `--uninstall` | Remove project configuration |
 | `-h, --help` | Show help |
 
@@ -98,152 +101,199 @@ opencode-tele --no-server          # Connect to existing server
 | `/session` | Create a new OpenCode session |
 | `/session <id>` | Select existing session by ID |
 | `/sessions` | List 10 most recent sessions |
-| `/continue` | Continue an old session (interactive) |
 | `/status` | Show current session, model, and mode |
 | `/abort` | Stop the currently running task |
-| `/clear` | Clear current session, model, and mode |
+| `/delete` | Delete current session |
+| `/reset` | Reset relay tracking state |
+| `/clear` | Clear session, model, and mode settings |
 
 ### Model Commands
 
 | Command | Description |
 |---------|-------------|
 | `/providers` | List available AI providers |
-| `/models <provider>` | List models for a specific provider |
-| `/model` | Show current model |
+| `/models <provider>` | List models for a provider |
 | `/model <provider> <model>` | Select a specific model |
 
 ### Mode Commands
 
 | Command | Description |
 |---------|-------------|
-| `/mode` | Show current mode |
-| `/mode <name>` | Select mode (build/plan/review/debug) |
-| `/modes` | List available modes |
+| `/mode <name>` | Select mode (e.g., `build` or `plan`) |
 
 ### File Commands
 
 | Command | Description |
 |---------|-------------|
-| `/files` | List files in current directory |
-| `/files <path>` | List files in specific directory |
+| `/files [path]` | List files in directory |
 | `/file <path>` | View file content |
-| `/find <pattern>` | Search code in project |
+| `/find <pattern>` | Search code |
 
 ### Info Commands
 
 | Command | Description |
 |---------|-------------|
-| `/cost` | Show token usage and cost for session |
+| `/cost` | Show token usage and cost |
 | `/todo` | Show task list |
 | `/diff` | Show file changes |
-| `/help` | Show all available commands |
+| `/help` | Show all commands |
 
-### Using the Bot
+### Quick Start Guide
 
-1. **Start a session**: Send `/session` to create a new session
-2. **Send a prompt**: Just type any message to prompt OpenCode
-3. **Multiple messages**: If busy, messages are automatically queued
+1. **Create session**: Send `/session`
+2. **Send prompt**: Just type any message (e.g., "create a todo app")
+3. **Watch progress**: Receive real-time updates on thinking, tools, and completion
+4. **Queue messages**: If busy, messages auto-queue with position notification
 
-## 🔧 How It Works
+## 🔧 Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Telegram      │────▶│   Telegram Bot    │────▶│  OpenCode API   │
-│   User          │◀────│   (grammy)        │◀────│  (localhost)    │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌──────────────────┐
-                        │ Event Processor  │
-                        │ (Polling Loop)   │
-                        └──────────────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                ▼
-        ┌──────────┐    ┌───────────┐   ┌─────────────┐
-        │Permission│    │  Message  │   │   Session   │
-        │ Handler  │    │   Queue   │   │   Status    │
-        └──────────┘    └───────────┘   └─────────────┘
+┌──────────┐     ┌─────────┐     ┌──────────────┐     ┌────────────┐
+│ Telegram │ ──▶ │  Bot    │ ──▶ │ EventProcessor│ ──▶ │   SSE      │
+│          │ ◀── │         │ ◀── │ (event-driven)│ ◀── │ /event     │
+└──────────┘     └─────────┘     └──────────────┘     └────────────┘
+                                         │
+                                         ▼
+                                  ┌─────────────┐
+                                  │ OpenCode    │
+                                  │ (localhost) │
+                                  └─────────────┘
 ```
 
-### Components
+### Key Design Decisions
 
-1. **Telegram Bot (grammy)**: Handles incoming messages and commands
-2. **OpenCode Client**: HTTP client to communicate with OpenCode server
-3. **Event Processor**: Polls OpenCode for updates (reasoning, tools, completion)
-4. **Message Queue**: Queues messages when OpenCode is busy
-5. **Permission Handler**: Manages file/tool permission requests
+| Component | Implementation |
+|-----------|----------------|
+| **Event Stream** | SSE (Server-Sent Events) - no polling |
+| **Server Management** | Bot starts/stops OpenCode automatically |
+| **Network** | Localhost only - no tunnels, no remote access |
+| **Message Queue** | Atomic enqueue to prevent race conditions |
+| **Security** | Single authorized user, no multi-tenant support |
 
-### Port Management
+### What This Bot Does NOT Do
 
-The bot automatically handles port conflicts:
-- If port 4097 is busy, it checks for existing OpenCode server
-- If none found, it tries ports 4098, 4099, etc. (up to 10 ports)
-- Each project can run on its own port simultaneously
+- ❌ No ngrok/Cloudflare tunnels (unless explicitly enabled with `--tunnel`)
+- ❌ No remote server exposure (by default)
+- ❌ No multi-user support
+- ❌ No cloud sync
+- ❌ No webhook-based Telegram integration (uses long polling)
 
 ## ⚙️ Configuration
 
 ### Project Configuration
 
-Configuration is stored in `.opencode-tele/` within each project:
+Stored in `.opencode-tele/` per project:
 
 ```
 project/
 ├── .opencode-tele/
-│   ├── config.json    # Bot token, user ID, settings
-│   ├── state.json    # Session, model, mode state
-│   └── bot.log       # Log file
+│   ├── config.json    # Bot token, user ID
+│   ├── state.json     # Sessions, models, modes
+│   └── bot.log        # Log file
 ```
 
 ### Environment Variables
 
-You can also use environment variables instead of config files:
+Alternative to config files:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your-bot-token"
 export AUTHORIZED_USER_ID="your-user-id"
 export OPENCODE_SERVER_URL="http://127.0.0.1:4097"
-export LOG_LEVEL="debug"
+export LOG_LEVEL="info"
 ```
 
-### State Persistence
+### OpenCode Pure Mode (Default)
 
-The bot persists:
-- Current session ID per chat
-- Selected model and mode
-- Queued messages
-- Cost tracking per session
-- Prompt counters
+By default, the bot starts OpenCode with `--pure` flag to disable:
+- Push notifications via cloud tunnels
+- External plugins
+- Remote access features
+
+This ensures everything stays local on `127.0.0.1`.
+
+### Enabling Remote Access (Optional)
+
+If you need remote access, use the `--tunnel` flag:
+
+```bash
+opencode-tele --tunnel
+```
+
+This starts OpenCode **without** `--pure`, allowing it to create Cloudflare tunnels for remote access.
+
+⚠️ **Security Warning**: Only use `--tunnel` if you:
+- Understand the security implications
+- Need remote access from outside your network
+- Trust the OpenCode push notification system
+
+## 🛑 Shutdown Behavior
+
+Press `Ctrl+C` to stop:
+
+```
+🔴 Stopping services...
+[OpenCode server stopped]
+[Telegram bot stopped]
+✅ Goodbye!
+
+📱 You receive: "🔴 OpenCode is going down 🔥"
+```
 
 ## 🐛 Troubleshooting
 
-### "Port already in use"
+### Port Already in Use
 
-The bot will automatically try the next available port. Or use:
 ```bash
-opencode-tele -p 5000  # Use a specific port
+# Use a different port
+opencode-tele -p 5000
+
+# Or stop existing server first
+lsof -ti:4097 | xargs kill
 ```
 
-### "OpenCode is not installed"
+### OpenCode Not Installed
 
 ```bash
 npm install -g opencode-ai
-opencode-tele --check
+opencode --version  # Verify
 ```
 
-### Bot not responding
+### Bot Not Responding
 
-1. Check your user ID is correct
+1. Check logs: `cat .opencode-tele/bot.log`
 2. Verify bot token with [@BotFather](https://t.me/botfather)
-3. Check logs in `.opencode-tele/bot.log`
+3. Ensure your user ID matches config
 
-### Session stuck
+### SSE Connection Failed
+
+If you see `SSE connection failed` in logs:
+- This is normal if OpenCode doesn't support SSE
+- Bot will still work via HTTP requests
+- Events won't be real-time but will be processed
+
+### Session Stuck
 
 ```bash
-/opencode-tele abort  # Stop current task
-/opencode-tele clear  # Clear session
-/opencode-tele session  # Create new session
+# In Telegram
+/abort   # Stop current task
+/clear   # Clear session state
+/session # Create new session
 ```
+
+## 📝 Logging
+
+Logs written to `.opencode-tele/bot.log`:
+
+```bash
+# View logs
+tail -f .opencode-tele/bot.log
+
+# Set log level
+export LOG_LEVEL=debug
+```
+
+Levels: `debug` | `info` | `warn` | `error`
 
 ## 🧹 Uninstallation
 
@@ -251,24 +301,68 @@ opencode-tele --check
 # Remove global command
 sudo npm uninstall -g opencode-tele
 
-# Clean up project-specific configs
+# Clean project configs
 opencode-tele --uninstall
+
+# Or manually remove
+rm -rf .opencode-tele/
 ```
 
-## 📝 Logging
+## 🏗️ Development
 
-Logs are written to `.opencode-tele/bot.log` with configurable levels:
-- `debug`: All messages (default for development)
-- `info`: General operations
-- `warn`: Warnings only
-- `error`: Errors only
+```bash
+# Install dependencies
+npm install
 
-Set via `LOG_LEVEL` environment variable or in config.
+# Build
+npm run build
+
+# Run in development mode
+npm run dev
+
+# Type check
+npm run typecheck
+```
+
+## 📦 Project Structure
+
+```
+src/
+├── bot/
+│   ├── commands.ts      # Telegram commands
+│   ├── handlers.ts      # Message handlers
+│   ├── index.ts         # TelegramBot class
+│   └── queue.ts         # Message queue (atomic operations)
+├── opencode/
+│   ├── client.ts        # HTTP client with SSE
+│   ├── events.ts        # Event processor
+│   ├── permission.ts    # Permission handling
+│   └── server.ts        # OpenCode server management
+├── state/
+│   └── manager.ts       # State persistence
+├── utils/
+│   ├── config.ts        # Configuration
+│   ├── formatter.ts     # Telegram formatting
+│   └── logger.ts        # Logging
+├── types/
+│   └── index.ts         # TypeScript types
+└── index.ts             # CLI entry point
+```
 
 ## 🤝 Contributing
 
-Contributions welcome! Please open an issue or submit a PR.
+Contributions welcome! Please:
+
+1. Open an issue to discuss the change
+2. Fork and create a PR
+3. Ensure tests pass
 
 ## 📜 License
 
 MIT License
+
+## 🙏 Acknowledgments
+
+- [OpenCode](https://github.com/opencode-ai/opencode) - AI coding CLI
+- [grammy](https://grammy.dev/) - Telegram Bot framework
+- [@BotFather](https://t.me/botfather) - Telegram bot creation

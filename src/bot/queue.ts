@@ -50,6 +50,23 @@ export class MessageQueue {
     if (queue.some(m => m.text === text)) return
     queue.push({ chatId, text })
     this.stateManager.addQueuedMessage(chatId, text)
+    getLogger().info('Message queued', { chatId, queueLength: queue.length })
+  }
+
+  /**
+   * Atomically enqueue a message and mark the chat as busy.
+   * Returns true if the message was queued, false if it was a duplicate.
+   */
+  tryEnqueueAndSetBusy(chatId: number, text: string): boolean {
+    if (!this.queues.has(chatId)) this.queues.set(chatId, [])
+    const queue = this.queues.get(chatId)!
+    if (queue.some(m => m.text === text)) return false
+    queue.push({ chatId, text })
+    this.stateManager.addQueuedMessage(chatId, text)
+    this.busyChats.add(chatId)
+    this.lastBusyTime.set(chatId, Date.now())
+    getLogger().info('Message queued atomically', { chatId, queueLength: queue.length })
+    return true
   }
 
   dequeue(chatId: number): QueuedMessage | undefined {
